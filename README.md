@@ -13,30 +13,53 @@ Key Features
 
 Commands
 
-Command Description
-cln Clear screen
-time Show current system time
-shutdown Soft shutdown
-reboot Reboot the system
-output <text> Print text
-dl list List assigned drive letters
-disk list List physical disk drives
-disk sel <n> Select disk drive
-disk part Partition selected disk
-part list List partitions
-part sel <n> Select partition
-part fm Format partition as FAT12
-ls List directory contents
-cd <path> Change directory
-write <text> -2 <file> Write content to file
-read <file> Display file contents
-crdir <name> Create directory
-dedir <name> Delete directory
-del <file> Delete file
-mem Show memory usage and process list
-copy <src> <dst> Copy file
-cut <src> <dst> Move file
-help Show command list
+Command     Description
+
+·cln #Clear screen
+
+·time #Show current system time
+
+·shutdown #Soft shutdown
+
+·reboot #Reboot the system
+
+·output <text> #Print text
+
+·dl list #List assigned drive letters
+
+·disk list #List physical disk drives
+
+·disk sel <n> #Select disk drive
+
+·disk part #Partition selected disk
+
+·part list #List partitions
+
+·part sel <n> #Select partition
+
+·part fm #Format partition as FAT12
+
+·ls #List directory contents
+
+·cd <path> #Change directory
+
+·write <text> -2 <file> #Write content to file
+
+·read <file> #Display file contents
+
+·crdir <name> #Create directory
+
+·dedir <name> #Delete directory
+
+·del <file> #Delete file
+
+·mem #Show memory usage and process list
+
+·copy <src> <dst> #Copy file
+
+·cut <src> <dst> #Move file
+
+·help #Show command list
 
 File Structure
 
@@ -73,7 +96,22 @@ Or
 .\build.bat
 ```
 
+Known BUGs:
+
+1. to a directory with too many levels and then returning to the parent level may cause an error (subdirectories might disappear). It's recommended not to create directories deeper than 4 levels.
+
+2. Disk drives won't be recognized after a system restart (the dl list command won't show drive letters).
+
+3. There are issues with the copy/paste commands.
+
+Project Information:
+
+· Name: yOS
+
+· Version: snapshot_0.21
+
 About
+
 Developed independently by YuZhuohao
 
 -----以下是中文版-----
@@ -93,30 +131,52 @@ yOS 是一个使用纯 x86 汇编编写的实验性操作系统项目。它展�
 
 命令列表
 
-命令 说明
-cln 清屏
-time 显示当前时间
-shutdown 软关机
-reboot 重启系统
-output <文本> 打印文本
-dl list 列出盘符
-disk list 列出物理磁盘
-disk sel <n> 选择磁盘
-disk part 分区当前磁盘
-part list 列出分区
-part sel <n> 选择分区
-part fm 格式化为FAT12
-ls 列出目录内容
-cd <路径> 切换目录
-write <文本> -2 <文件> 写入文件
-read <文件> 显示文件内容
-crdir <名称> 创建目录
-dedir <名称> 删除目录
-del <文件> 删除文件
-mem 显示内存和进程信息
-copy <源> <目标> 复制文件
-cut <源> <目标> 移动文件
-help 显示命令列表
+命令     说明
+·cln #清屏
+
+·time #显示当前时间
+
+·shutdown #软关机
+
+·reboot #重启系统
+
+·output <文本> #打印文本
+
+·dl list #列出盘符
+
+·disk list #列出物理磁盘
+
+·disk sel <n> #选择磁盘
+
+·disk part #分区当前磁盘
+
+·part list #列出分区
+
+·part sel <n> #选择分区
+
+·part fm #格式化为FAT12
+
+·ls #列出目录内容
+
+·cd <路径> #切换目录
+
+·write <文本> -2 <文件> #写入文件
+
+·read <文件> #显示文件内容
+
+·crdir <名称> #创建目录
+
+·dedir <名称> #删除目录
+
+·del <文件> #删除文件
+
+·mem #显示内存和进程信息
+
+·copy <源> <目标> #复制文件
+
+·cut <源> <目标> #移动文件
+
+·help #显示命令列表
 
 文件结构
 
@@ -153,5 +213,20 @@ dd if=kernel.bin of=disk.vhd bs=512 count=64 seek=1 conv=notrunc
 .\build.bat
 ```
 
+已知BUGs:
+
+1.当进入层数过多的目录并返回上一级时可能会出错(下一级目录可能会消失)，建议不要创建超过4层的目录
+
+2.系统重启后不会识别到磁盘驱动器(使用dl list 命令无法列出盘符)
+
+3.复制/剪切命令有问题
+
+项目信息:
+
+· 名称 : yOS
+
+· 版本 : snapshot_0.21
+
 关于
-由YuZhuohao个人独立开发
+
+#由YuZhuohao个人独立开发
