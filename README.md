@@ -83,7 +83,7 @@ The `tui` command launches a text‑mode graphical environment with keyboard nav
 
 **Prerequisites**: [NASM](https://www.nasm.us/) assembler, an x86 emulator (e.g., [QEMU](https://www.qemu.org/)) or real hardware.
 
-'''
+```
 # Assemble boot sector and kernel
 nasm -f bin boot.asm -o boot.bin
 nasm -f bin kernel.asm -o kernel.bin
@@ -96,14 +96,14 @@ dd if=boot.bin of=disk.vhd bs=512 count=1 conv=notrunc
 
 # Write kernel (128 sectors, starting at sector 1)
 dd if=kernel.bin of=disk.vhd bs=512 count=128 seek=1 conv=notrunc
-'''
+```
 
 Alternatively, run `build.bat` (Windows) to automate the process.
 
 **Run with QEMU**:
-'''
+```
 qemu-system-i386 -drive file=disk.vhd,format=raw -m 64M
-'''
+```
 
 ###  Known Bugs / Limitations
 
@@ -198,7 +198,7 @@ Developed independently by **YuZhuohao** as a personal project.
 
 **前置条件**：[NASM](https://www.nasm.us/) 汇编器，x86 模拟器（如 [QEMU](https://www.qemu.org/)）或真实硬件。
 
-'''
+```
 # 汇编引导扇区和内核
 nasm -f bin boot.asm -o boot.bin
 nasm -f bin kernel.asm -o kernel.bin
@@ -211,14 +211,14 @@ dd if=boot.bin of=disk.vhd bs=512 count=1 conv=notrunc
 
 # 写入内核（128 个扇区，从扇区 1 开始）
 dd if=kernel.bin of=disk.vhd bs=512 count=128 seek=1 conv=notrunc
-'''
+```
 
 或者运行 `build.bat`（Windows）自动完成。
 
 **使用 QEMU 运行**：
-'''
+```
 qemu-system-i386 -drive file=disk.vhd,format=raw -m 64M
-'''
+```
 
 ###  已知BUGs
 
