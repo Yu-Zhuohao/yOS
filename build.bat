@@ -6,14 +6,14 @@ echo                       yOS Build Script
 echo ============================================================
 echo.
 
-set /p VER=Enter Project Path (e.g. C:\Download\yOS\src):
-if "%VER%"=="" (
+set /p PATH=Enter Project Path (e.g. C:\Download\yOS\src):
+if "%PATH%"=="" (
     echo ERROR: Invalid path
     pause
     exit /b 1
 )
 
-set PROJECT=%VER%
+set PROJECT=%PATH%
 if not exist "%PROJECT%\" (
     echo ERROR: Directory not found: %PROJECT%
     pause
@@ -68,7 +68,7 @@ if errorlevel 2 (
 if errorlevel 1 (
     echo Proceeding...
     dd if=boot.bin of=disk.vhd bs=512 count=1 conv=notrunc
-    dd if=kernel.bin of=disk.vhd bs=512 count=64 seek=1 conv=notrunc
+    dd if=kernel.bin of=disk.vhd bs=512 count=255 seek=1 conv=notrunc
     echo Done.
     echo Press any key to exit...
     pause >nul

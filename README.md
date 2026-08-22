@@ -1,232 +1,232 @@
-yOS - A Purely Assembly Operating System
+# yOS – A Purely Assembly Operating System
 
-yOS is an experimental operating system project written in pure x86 assembly. It demonstrates core operating system concepts including bootloading, real-mode to protected-mode transition, IDE disk I/O, FAT12 file system support, memory management, process scheduling, and a command-line shell interface.
+[English](#english) | [中文](#chinese)
 
-Key Features
+---
 
-· Dual-mode Operation: Starts in 16-bit real mode, transitions to 32-bit protected mode
-· IDE Disk Support: Full IDE driver with LBA addressing, disk detection, and partition management
-· FAT12 File System: Complete implementation supporting file read/write, directory navigation, creation, and deletion
-· Command Shell: Interactive shell with built-in commands for file system and system management
-· Memory Management: Basic page-based allocation with 4KB granularity and process memory tracking
-· Process Scheduling: Simple round-robin scheduler with process state management
+<a id="english"></a>
+## English Version
 
-Commands
+**yOS** is an experimental operating system written entirely in x86 assembly language. It demonstrates core operating system concepts including bootloading, real‑to‑protected mode transition, IDE disk I/O, FAT12 file system support, memory management, process scheduling, and a command‑line shell with graphical TUI applications.
 
-Command     Description
+###  Key Features
 
-·cln #Clear screen
+- **Dual‑mode Execution** – Starts in 16‑bit real mode, then switches to 32‑bit protected mode with paging enabled.
+- **Complete IDE Driver** – Supports LBA addressing, disk detection, MBR partition table parsing, and sector read/write operations.
+- **FAT12 File System** – Full implementation with subdirectory support, file/directory create, read, write, delete, and navigation.
+- **Interactive Shell** – Built‑in commands for system control, file management, and disk/partition operations.
+- **Memory Management** – 4KB page‑based bitmap allocator with per‑process memory usage tracking.
+- **Process Scheduling** – Simple round‑robin scheduler with process control blocks (PCBs) and states (READY/RUNNING).
+- **TUI Desktop** – Graphical text‑mode menu with a **Calculator** and a **Notepad** (including file open/save dialogs).
+- **CMOS RTC Support** – Read current time and date from the hardware clock.
+- **Drive Letter Assignment** – Automatically mounts FAT12 partitions and assigns drive letters (A, B, …).
 
-·time #Show current system time
+###  Command Reference
 
-·shutdown #Soft shutdown
+| Command                | Description |
+|------------------------|-------------|
+| `cln`                  | Clear the screen |
+| `time`                 | Show current system time (HH:MM:SS) |
+| `date`                 | Show current date (YYYY‑MM‑DD) |
+| `shutdown`             | Soft shutdown (via ACPI) |
+| `reboot`               | Reboot the system |
+| `output <text>`        | Print arbitrary text to the console |
+| `help [page]`          | Display command list (with paging) |
+| `dl list`              | List assigned drive letters |
+| `disk list`            | List physical IDE disks (primary/secondary master/slave) |
+| `disk sel <n>`         | Select a physical disk |
+| `disk part`            | Partition the selected disk (single FAT12 partition) |
+| `part list`            | List partitions on the selected disk |
+| `part sel <n>`         | Select a partition |
+| `part fm`              | Format the selected partition as FAT12 |
+| `ls`                   | List current directory contents |
+| `cd <path>`            | Change directory (absolute or relative, e.g. `A/subdir`) |
+| `write <text> -2 <file>` | Write text to a file (overwrites if exists) |
+| `read <file>`          | Display file contents |
+| `crdir <name>`         | Create a directory |
+| `dedir <name>`         | Delete an empty directory |
+| `del <file>`           | Delete a file |
+| `del *`                | Delete all files in the current directory |
+| `mem`                  | Show memory usage and process list (PID, status, memory, name) |
+| `copy <src> <dst>`     | Copy a file or wildcard (`*`) to a destination directory |
+| `mov <src> <dst>`      | Move (cut and paste) a file or wildcard |
+| `color <bg><fg>`       | Set console color (two hex digits, e.g. `color 0f` for white on black) |
+| `tui`                  | Enter the graphical TUI desktop |
 
-·reboot #Reboot the system
+###  TUI Applications
 
-·output <text> #Print text
+The `tui` command launches a text‑mode graphical environment with keyboard navigation:
 
-·dl list #List assigned drive letters
+- **Desktop Menu** – Lists applications and system actions.
+- **Calculator** – Performs basic arithmetic (+, −, ×, ÷) with button or keyboard input. Supports digit entry, operators, clear, and backspace.[Please note that this feature is still in the testing phase and may have bugs]
+- **Notepad** – A basic text editor with:
+  - Insert/delete characters, arrow‑key cursor movement.
+  - Undo/Redo (up to 4 levels).
+  - Save/Open file dialogs with directory browsing.
+  - File list and filename input.
 
-·disk list #List physical disk drives
+###  File System & Storage
 
-·disk sel <n> #Select disk drive
+- **Partitioning**: Creates a single MBR partition on the selected disk.
+- **Formatting**: Formats a partition as FAT12 with a valid boot sector, two FAT copies, and a root directory.
+- **Drive Letters**: Automatically assigned to every valid FAT12 partition found during boot or after formatting. Use `dl list` to see current mappings.
+- **Navigation**: Supports absolute paths (e.g., `A/subdir/file.txt`) and relative paths. Drive switching is done via `cd A` (or `cd A/`).
 
-·disk part #Partition selected disk
+###  Memory & Process Management
 
-·part list #List partitions
+- **Allocator**: Bitmap‑based, allocating 4KB pages from a 2MB pool (0x200000 – 0x3FFFFF).
+- **PCBs**: Stored at 0x110000, each 64 bytes, holding PID, state, stack pointer, memory size, parent PID, and name.
+- **Scheduler**: Round‑robin, switching between processes with states READY and RUNNING.
+- **`mem` command** shows real‑time memory usage and a list of all processes (including idle and shell).
 
-·part sel <n> #Select partition
+###  Building & Running
 
-·part fm #Format partition as FAT12
+**Prerequisites**: [NASM](https://www.nasm.us/) assembler, an x86 emulator (e.g., [QEMU](https://www.qemu.org/)) or real hardware.
 
-·ls #List directory contents
-
-·cd <path> #Change directory
-
-·write <text> -2 <file> #Write content to file
-
-·read <file> #Display file contents
-
-·crdir <name> #Create directory
-
-·dedir <name> #Delete directory
-
-·del <file> #Delete file
-
-·mem #Show memory usage and process list
-
-·copy <src> <dst> #Copy file
-
-·cut <src> <dst> #Move file
-
-·help #Show command list
-
-File Structure
-
-```
-yOS/
-├── build.bat   → Build script
-└── src/
-      ├── boot/
-      │    └── boot.asm   → Load the kernel from disk
-      └── kernel/
-            ├── kernel.asm → Real mode entry, switch to protected mode
-            ├── io.asm     → VGA text output, keyboard input
-            ├── fs.asm     → IDE drive, FAT12 file system
-            ├── mem.asm    → Pagination, memory allocator, PCB management
-            └── shell.asm  → Command interpreter
-```
-
-Build Requirements
-
-· NASM assembler
-· x86 emulator (QEMU recommended or VMware) or real hardware
-
-Building
-
-```bash
+'''
+# Assemble boot sector and kernel
 nasm -f bin boot.asm -o boot.bin
 nasm -f bin kernel.asm -o kernel.bin
 
+# Create a disk image (e.g., 4MB)
+dd if=/dev/zero of=disk.vhd bs=1M count=4
+
+# Write boot sector
 dd if=boot.bin of=disk.vhd bs=512 count=1 conv=notrunc
-dd if=kernel.bin of=disk.vhd bs=512 count=64 seek=1 conv=notrunc
-```
-Or
-```bash
-.\build.bat
-```
 
-Known BUGs:
+# Write kernel (128 sectors, starting at sector 1)
+dd if=kernel.bin of=disk.vhd bs=512 count=128 seek=1 conv=notrunc
+'''
 
-1. to a directory with too many levels and then returning to the parent level may cause an error (subdirectories might disappear). It's recommended not to create directories deeper than 4 levels.
+Alternatively, run `build.bat` (Windows) to automate the process.
 
-2. Disk drives won't be recognized after a system restart (the dl list command won't show drive letters).
+**Run with QEMU**:
+'''
+qemu-system-i386 -drive file=disk.vhd,format=raw -m 64M
+'''
 
-3. There are issues with the copy/paste commands.
+###  Known Bugs / Limitations
 
-Project Information:
+1. **TUI's computer problem** – Can't use it properly
 
-· Name: yOS
+###  License & Credits
 
-· Version: snapshot_0.21
+Developed independently by **YuZhuohao** as a personal project.
 
-About
+- Version: `snapshot_0.27`
+- Language: Pure x86 Assembly
 
-Developed independently by YuZhuohao
 
------以下是中文版-----
+---
 
-yOS - 一个纯汇编操作系统
+<a id="chinese"></a>
+## 中文版本
 
-yOS 是一个使用纯 x86 汇编编写的实验性操作系统项目。它展示了核心操作系统概念，包括引导加载、实模式到保护模式切换、IDE磁盘I/O、FAT12文件系统支持、内存管理、进程调度以及命令行Shell界面。
+**yOS** 是一个使用纯 x86 汇编编写的实验性操作系统。它展示了从引导、实模式到保护模式切换、IDE 磁盘驱动、FAT12 文件系统、内存管理、进程调度以及带有图形化 TUI 应用程序的命令行 Shell 等核心操作系统概念。
 
-主要特性
+###  主要特性
 
-· 双模式运行：从16位实模式启动，切换到32位保护模式
-· IDE磁盘支持：完整的IDE驱动，支持LBA寻址、磁盘检测和分区管理
-· FAT12文件系统：完整实现，支持文件读写、目录导航、创建和删除
-· 命令行Shell：交互式Shell，内置文件和系统管理命令
-· 内存管理：基于分页的内存分配，4KB粒度，支持进程内存跟踪
-· 进程调度：简单的轮转调度器，支持进程状态管理
+- **双模式运行** – 从 16 位实模式启动，切换到 32 位保护模式并启用分页。
+- **完整 IDE 驱动** – 支持 LBA 寻址、磁盘检测、MBR 分区表解析和扇区读写。
+- **FAT12 文件系统** – 完整实现，支持子目录、文件/目录的创建、读写、删除和导航。
+- **交互式 Shell** – 内置系统控制、文件管理和磁盘/分区操作命令。
+- **内存管理** – 基于 4KB 页面的位图分配器，可显示每个进程的内存使用情况。
+- **进程调度** – 轮转调度器，使用进程控制块（PCB）管理进程状态（就绪/运行）。
+- **TUI 桌面** – 图形化菜单，内置**计算器**和**记事本**（含文件打开/保存对话框）。
+- **CMOS RTC 支持** – 读取当前时间和日期。
+- **盘符分配** – 自动挂载 FAT12 分区并分配盘符（A、B …）。
 
-命令列表
+###  命令参考
 
-命令     说明
-·cln #清屏
+| 命令                   | 说明 |
+|------------------------|------|
+| `cln`                  | 清屏 |
+| `time`                 | 显示当前时间（时:分:秒） |
+| `date`                 | 显示当前日期（年-月-日） |
+| `shutdown`             | 硬关机 |
+| `reboot`               | 重启系统 |
+| `output <文本>`        | 打印任意文本 |
+| `help [页码]`          | 显示命令列表（支持分页） |
+| `dl list`              | 列出已分配的盘符 |
+| `disk list`            | 列出物理 IDE 磁盘 |
+| `disk sel <n>`         | 选择物理磁盘 |
+| `disk part`            | 对所选磁盘分区（ FAT12 分区） |
+| `part list`            | 列出所选磁盘上的分区 |
+| `part sel <n>`         | 选择分区 |
+| `part fm`              | 将所选分区格式化为 FAT12 |
+| `ls`                   | 列出当前目录内容 |
+| `cd <路径>`            | 切换目录（绝对/相对，如 `A/子目录`） |
+| `write <文本> -2 <文件>` | 将文本写入文件（覆盖） |
+| `read <文件>`          | 显示文件内容 |
+| `crdir <名称>`         | 创建目录 |
+| `dedir <名称>`         | 删除空目录 |
+| `del <文件>`           | 删除文件 |
+| `del *`                | 删除当前目录下所有文件 |
+| `mem`                  | 显示内存使用和进程列表 |
+| `copy <源> <目标>`     | 复制文件或通配符（`*`）到目标目录 |
+| `mov <源> <目标>`      | 移动（剪切）文件或通配符 |
+| `color <背景><前景>`   | 设置控制台颜色（两位十六进制，如 `color 0f`） |
+| `tui`                  | 进入图形化 TUI 桌面 |
 
-·time #显示当前时间
+###  TUI 应用程序
 
-·shutdown #软关机
+`tui` 命令启动文本模式图形化环境，使用键盘导航：
 
-·reboot #重启系统
+- **桌面菜单** – 列出应用程序和系统操作。
+- **计算器** – 基本算术（+、−、×、÷），支持按钮或键盘输入，包括数字、运算符、清除和退格。[请注意，该功能目前仍处于测试阶段，有BUG]
+- **记事本** – 文本编辑器，功能包括：
+  - 插入/删除字符，方向键移动光标。
+  - 撤销/重做（最多 4 级）。
+  - 打开/保存文件对话框，支持目录浏览。
+  - 文件列表和文件名输入。
 
-·output <文本> #打印文本
+###  文件系统与存储
 
-·dl list #列出盘符
+- **分区**：在所选磁盘上创建一个 MBR 分区，支持自定义大小。
+- **格式化**：将分区格式化为 FAT12。
+- **盘符**：启动或格式化后自动为每个有效的 FAT12 分区分配盘符。使用 `dl list` 查看当前映射。
+- **导航**：支持绝对路径（如 `A/子目录/文件.txt`）和相对路径。切换盘符使用 `cd A`（或 `cd A/`）。
 
-·disk list #列出物理磁盘
+###  内存与进程管理
 
-·disk sel <n> #选择磁盘
+- **分配器**：基于位图，从 2MB 内存池（0x200000 – 0x3FFFFF）分配 4KB 页面。
+- **PCB**：存储在 0x110000，每个 64 字节，包含 PID、状态、栈指针、内存大小、父 PID 和名称。
+- **调度器**：轮转调度，在就绪和运行状态间切换。
+- **`mem` 命令**显示实时内存使用情况和所有进程列表（包括空闲和 Shell 进程）。
 
-·disk part #分区当前磁盘
+###  构建与运行
 
-·part list #列出分区
+**前置条件**：[NASM](https://www.nasm.us/) 汇编器，x86 模拟器（如 [QEMU](https://www.qemu.org/)）或真实硬件。
 
-·part sel <n> #选择分区
-
-·part fm #格式化为FAT12
-
-·ls #列出目录内容
-
-·cd <路径> #切换目录
-
-·write <文本> -2 <文件> #写入文件
-
-·read <文件> #显示文件内容
-
-·crdir <名称> #创建目录
-
-·dedir <名称> #删除目录
-
-·del <文件> #删除文件
-
-·mem #显示内存和进程信息
-
-·copy <源> <目标> #复制文件
-
-·cut <源> <目标> #移动文件
-
-·help #显示命令列表
-
-文件结构
-
-```
-yOS/
-├── build.bat   → 构建脚本
-└── src/
-      ├── boot/
-      │    └── boot.asm   → 从磁盘加载内核
-      └── kernel/
-            ├── kernel.asm → 实模式入口，切换到保护模式
-            ├── io.asm     → VGA文本输出，键盘输入
-            ├── fs.asm     → IDE驱动，FAT12文件系统
-            ├── mem.asm    → 分页，内存分配器，PCB管理
-            └── shell.asm  → 命令解释器
-```
-
-构建要求
-
-· NASM 汇编器
-· x86仿真器（推荐QEMU或VMware）或真实硬件
-
-构建
-
-```bash
+'''
+# 汇编引导扇区和内核
 nasm -f bin boot.asm -o boot.bin
 nasm -f bin kernel.asm -o kernel.bin
 
+# 创建磁盘镜像（例如 4MB）
+dd if=/dev/zero of=disk.vhd bs=1M count=4
+
+# 写入引导扇区
 dd if=boot.bin of=disk.vhd bs=512 count=1 conv=notrunc
-dd if=kernel.bin of=disk.vhd bs=512 count=64 seek=1 conv=notrunc
-```
-或者
-```bash
-.\build.bat
-```
 
-已知BUGs:
+# 写入内核（128 个扇区，从扇区 1 开始）
+dd if=kernel.bin of=disk.vhd bs=512 count=128 seek=1 conv=notrunc
+'''
 
-1.当进入层数过多的目录并返回上一级时可能会出错(下一级目录可能会消失)，建议不要创建超过4层的目录
+或者运行 `build.bat`（Windows）自动完成。
 
-2.系统重启后不会识别到磁盘驱动器(使用dl list 命令无法列出盘符)
+**使用 QEMU 运行**：
+'''
+qemu-system-i386 -drive file=disk.vhd,format=raw -m 64M
+'''
 
-3.复制/剪切命令有问题
+###  已知BUGs
 
-项目信息:
+1. **TUI的计算机问题** – 无法正常使用
 
-· 名称 : yOS
+###  许可与致谢
 
-· 版本 : snapshot_0.21
+由 **YuZhuohao** 个人独立开发。
 
-关于
-
-#由YuZhuohao个人独立开发
+- 版本：`snapshot_0.27`
+- 语言：纯 x86 汇编
