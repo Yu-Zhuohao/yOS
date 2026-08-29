@@ -55,7 +55,7 @@ yOS is a hobby operating system kernel written entirely in x86 assembly (NASM). 
 | `disk del allpart` | Delete all partitions on the selected disk |
 | `part list` | List partitions on the selected disk |
 | `part sel <n>` | Select a partition (1..4) |
-| `part fm [-fs fat12|fat32]` | Format the selected partition (default FAT12) |
+| `part fm [-fs fat12/fat32]` | Format the selected partition (default FAT12) |
 | `part del` | Delete the selected partition |
 | `dl list` | List all mounted drive letters |
 
@@ -169,7 +169,7 @@ yOS 是一个完全用 x86 汇编语言（NASM 语法）编写的操作系统内
 | `disk del allpart` | 删除当前磁盘的所有分区 |
 | `part list` | 列出当前磁盘的分区 |
 | `part sel <n>` | 选择分区（1..4） |
-| `part fm [-fs fat12|fat32]` | 格式化当前分区（默认 FAT12） |
+| `part fm [-fs fat12/fat32]` | 格式化当前分区（默认 FAT12） |
 | `part del` | 删除当前分区 |
 | `dl list` | 列出所有已挂载的盘符 |
 
