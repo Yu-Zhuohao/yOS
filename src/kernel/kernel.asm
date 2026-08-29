@@ -109,7 +109,7 @@ CMD_IDENTIFY  equ 0xEC
 SECTOR_SIZE   equ 512
 DIRS_PER_SECT equ 16
 BYTES_PER_DIR equ 32
-MAX_DRIVES    equ 16
+MAX_DRIVES    equ 26
 prot_start:
     mov ax, 0x10
     mov ds, ax
@@ -155,12 +155,7 @@ prot_start:
     call proc_init
     call cmd_loop
     jmp $
-;=============================================================================
-; Screen I/O - Text mode display functions
-;=============================================================================
-
 clear_screen:
-    ; Clear entire screen with current color
     pusha
     mov edi, 0xB8000
     mov ecx, 80*25
@@ -743,12 +738,7 @@ print_bcd:
     call print_char
     popa
     ret
-;=============================================================================
-; Keyboard Driver - Scancode to ASCII conversion with shift support
-;=============================================================================
-
 keyboard_init:
-    ; Initialize keyboard controller
     pusha
 .wait1:
     in al, 0x64
@@ -1519,14 +1509,7 @@ set_cursor_pos:
     call update_cursor
     popa
     ret
-;=============================================================================
-; String and Number Utilities
-;=============================================================================
-
 cmd_match:
-    ; Case-insensitive command matching
-    ; Input: esi = input string, edi = command to match
-    ; Output: eax = 1 if match, 0 if not
     push esi
     push edi
     push ecx
@@ -1713,13 +1696,7 @@ input_len dd 0
 cursor_pos_in_buf dd 0
 input_start dd 0
 current_color db 0x0F
-;=============================================================================
-; IDE Disk Driver - Low-level disk I/O
-;=============================================================================
-
 ide_select_disk:
-    ; Select IDE disk based on disk number in al
-    ; Sets ide_base_port and ide_drive_bit
     push eax
     test al, 2
     jz .primary
@@ -2011,13 +1988,7 @@ get_disk_size:
     mov [disk_size_sectors], eax
     popa
     ret
-;=============================================================================
-; MBR Partition Table Management
-;=============================================================================
-
 read_mbr:
-    ; Read MBR and parse partition table entries
-    ; Stores active partitions in partition_table
     pusha
     xor eax, eax
     mov ecx, 1
@@ -2162,13 +2133,7 @@ write_mbr_from_table:
     call ide_write_sectors
     popa
     ret
-;=============================================================================
-; FAT12/FAT32 Filesystem Functions
-;=============================================================================
-
 load_boot_sector:
-    ; Read boot sector and calculate filesystem layout
-    ; Sets: fat1_start, root_dir_start, data_area_start
     pusha
     mov eax, [selected_partition_start]
     mov ecx, 1
@@ -2184,8 +2149,6 @@ load_boot_sector:
     mov [fat_num_fats], al
     mov ax, [sector_buffer + 17]
     mov [fat_root_entries], ax
-    mov ax, [sector_buffer + 22]
-    mov [fat_sectors_per_fat], ax
     mov ax, [sector_buffer + 19]
     mov [fat_total_sectors], ax
     mov eax, [sector_buffer + 32]
@@ -2193,14 +2156,33 @@ load_boot_sector:
     jz .use_small
     mov [fat_total_sectors], eax
 .use_small:
+    mov byte [fs_type], 0
+    movzx eax, word [sector_buffer + 22]
+    test eax, eax
+    jnz .fat12_layout
+    mov eax, [sector_buffer + 36]
+    test eax, eax
+    jz .fat12_layout
+    mov byte [fs_type], 1
+    mov [fat_sectors_per_fat], eax
+    mov eax, [sector_buffer + 44]
+    mov [fat_root_cluster], eax
+    jmp .layout
+.fat12_layout:
+    movzx eax, word [sector_buffer + 22]
+    mov [fat_sectors_per_fat], eax
+    mov dword [fat_root_cluster], 0
+.layout:
     movzx eax, word [fat_reserved_sectors]
     add eax, [selected_partition_start]
     mov [fat1_start], eax
-    movzx eax, word [fat_sectors_per_fat]
+    mov eax, [fat_sectors_per_fat]
     movzx ebx, byte [fat_num_fats]
     mul ebx
     add eax, [fat1_start]
     mov [root_dir_start], eax
+    cmp byte [fs_type], 1
+    je .no_root_area
     movzx eax, word [fat_root_entries]
     mov ebx, 32
     mul ebx
@@ -2211,8 +2193,37 @@ load_boot_sector:
     div ebx
     add eax, [root_dir_start]
     mov [data_area_start], eax
+    jmp .load_fat
+.no_root_area:
+    mov eax, [root_dir_start]
+    mov [data_area_start], eax
+.load_fat:
+    cmp byte [fat_sectors_per_cluster], 0
+    je .maxcap_skip
+    mov eax, [fat_total_sectors]
+    add eax, [selected_partition_start]
+    sub eax, [data_area_start]
+    movzx ebx, byte [fat_sectors_per_cluster]
+    xor edx, edx
+    div ebx
+    add eax, 1
+    mov [fat_max_cluster], eax
+    cmp byte [fs_type], 1
+    jne .maxcap_done
+    mov ecx, FAT_BUFFER_SECTORS * 128
+    cmp [fat_max_cluster], ecx
+    jle .maxcap_done
+    mov [fat_max_cluster], ecx
+    jmp .maxcap_done
+.maxcap_skip:
+    mov dword [fat_max_cluster], 0
+.maxcap_done:
     mov eax, [fat1_start]
-    movzx ecx, word [fat_sectors_per_fat]
+    mov ecx, [fat_sectors_per_fat]
+    cmp ecx, FAT_BUFFER_SECTORS
+    jbe .fat_size_ok
+    mov ecx, FAT_BUFFER_SECTORS
+.fat_size_ok:
     mov edi, fat_buffer
     call ide_read_sectors
     popa
@@ -2220,12 +2231,20 @@ load_boot_sector:
 write_fat:
     pusha
     mov eax, [fat1_start]
-    movzx ecx, word [fat_sectors_per_fat]
+    mov ecx, [fat_sectors_per_fat]
+    cmp ecx, FAT_BUFFER_SECTORS
+    jbe .fat1_size_ok
+    mov ecx, FAT_BUFFER_SECTORS
+.fat1_size_ok:
     mov esi, fat_buffer
     call ide_write_sectors
-    movzx eax, word [fat_sectors_per_fat]
-    add eax, [fat1_start]
-    movzx ecx, word [fat_sectors_per_fat]
+    mov eax, [fat1_start]
+    add eax, [fat_sectors_per_fat]
+    mov ecx, [fat_sectors_per_fat]
+    cmp ecx, FAT_BUFFER_SECTORS
+    jbe .fat2_size_ok
+    mov ecx, FAT_BUFFER_SECTORS
+.fat2_size_ok:
     mov esi, fat_buffer
     call ide_write_sectors
     popa
@@ -2243,6 +2262,9 @@ write_dir_sector:
     xor edx, edx
     div ecx
     mov ecx, eax
+    cmp ecx, 14
+    jbe .do_write
+    mov ecx, 14
     jmp .do_write
 .one_sector:
     mov ecx, 1
@@ -2338,72 +2360,62 @@ format_fat12:
     jmp .zero_loop
 .zero_done:
     call load_boot_sector
-    mov eax, [root_dir_start]
-    mov [current_dir_cluster], dword 0
-    mov [current_dir_sector], eax
+    call set_root_dir
     popa
     ret
 format_fat32:
-    ; Format partition as FAT32 with low-level zero fill
     pusha
-    ; Clear sector buffer
     mov edi, sector_buffer
     mov ecx, 512
     xor al, al
     rep stosb
-    ; Build FAT32 boot sector
     mov byte [sector_buffer], 0xEB
     mov byte [sector_buffer + 1], 0x58
     mov byte [sector_buffer + 2], 0x90
-    mov dword [sector_buffer + 3], 0x2020594D  ; "MY  "
-    mov word [sector_buffer + 11], 512         ; Bytes per sector
-    mov byte [sector_buffer + 13], 1           ; Sectors per cluster
-    mov word [sector_buffer + 14], 32          ; Reserved sectors
-    mov byte [sector_buffer + 16], 2           ; Number of FATs
-    mov word [sector_buffer + 17], 0           ; Root entries (0 for FAT32)
-    mov word [sector_buffer + 19], 0           ; Total sectors (16-bit, 0 for FAT32)
-    mov byte [sector_buffer + 21], 0xF8        ; Media descriptor
-    mov word [sector_buffer + 22], 0           ; Sectors per FAT (0 for FAT32)
-    mov word [sector_buffer + 24], 63          ; Sectors per track
-    mov word [sector_buffer + 26], 255         ; Number of heads
-    mov dword [sector_buffer + 28], 0          ; Hidden sectors
-    mov dword [sector_buffer + 32], 0          ; Total sectors (32-bit, filled below)
-    mov dword [sector_buffer + 36], 0          ; Sectors per FAT (32-bit, filled below)
-    mov word [sector_buffer + 40], 0           ; Flags
-    mov word [sector_buffer + 42], 0           ; Version
-    mov dword [sector_buffer + 44], 2          ; Root directory cluster
-    mov word [sector_buffer + 48], 1           ; FSInfo sector
-    mov word [sector_buffer + 50], 6           ; Backup boot sector
-    mov byte [sector_buffer + 36], 0x80        ; Drive number
-    mov byte [sector_buffer + 38], 0x29        ; Signature
-    mov dword [sector_buffer + 39], 0x12345678 ; Volume serial
-    mov dword [sector_buffer + 54], 0x20544146  ; "FAT"
-    mov dword [sector_buffer + 58], 0x20323332 ; "32  "
-    mov dword [sector_buffer + 62], 0x20202020 ; "    "
-    mov word [sector_buffer + 510], 0xAA55     ; Boot signature
-    ; Calculate total sectors and FAT size
+    mov dword [sector_buffer + 3], 0x2020594D
+    mov word [sector_buffer + 11], 512
+    mov byte [sector_buffer + 13], 1
+    mov word [sector_buffer + 14], 32
+    mov byte [sector_buffer + 16], 2
+    mov word [sector_buffer + 17], 0
+    mov word [sector_buffer + 19], 0
+    mov byte [sector_buffer + 21], 0xF8
+    mov word [sector_buffer + 22], 0
+    mov word [sector_buffer + 24], 63
+    mov word [sector_buffer + 26], 255
+    mov dword [sector_buffer + 28], 0
+    mov dword [sector_buffer + 32], 0
+    mov dword [sector_buffer + 36], 0
+    mov word [sector_buffer + 40], 0
+    mov word [sector_buffer + 42], 0
+    mov dword [sector_buffer + 44], 2
+    mov word [sector_buffer + 48], 1
+    mov word [sector_buffer + 50], 6
+    mov byte [sector_buffer + 64], 0x80
+    mov byte [sector_buffer + 66], 0x29
+    mov dword [sector_buffer + 67], 0x12345678
+    mov dword [sector_buffer + 54], 0x20544146
+    mov dword [sector_buffer + 58], 0x20323332
+    mov dword [sector_buffer + 62], 0x20202020
+    mov word [sector_buffer + 510], 0xAA55
     mov eax, [selected_partition_size]
     dec eax
-    mov [sector_buffer + 32], eax              ; Total sectors (32-bit)
-    ; Calculate FAT size (approximate: 1 sector per 128 clusters)
+    mov [sector_buffer + 32], eax
     mov ebx, eax
-    shr ebx, 7                                 ; FAT sectors = total_sectors / 128
+    shr ebx, 7
     cmp ebx, 0
     jne .fat_size_ok
     mov ebx, 1
 .fat_size_ok:
-    mov [sector_buffer + 36], ebx              ; FAT size (32-bit)
-    ; Write boot sector
+    mov [sector_buffer + 36], ebx
     mov eax, [selected_partition_start]
     mov ecx, 1
     mov esi, sector_buffer
     call ide_write_sectors
-    ; Clear FAT buffer
     mov edi, fat_buffer
     mov ecx, 4608
     xor al, al
     rep stosb
-    ; Initialize FAT32 root entries
     mov byte [fat_buffer], 0xF8
     mov byte [fat_buffer + 1], 0xFF
     mov byte [fat_buffer + 2], 0xFF
@@ -2416,32 +2428,28 @@ format_fat32:
     mov byte [fat_buffer + 9], 0xFF
     mov byte [fat_buffer + 10], 0xFF
     mov byte [fat_buffer + 11], 0x0F
-    ; Write FAT tables
     call write_fat
-    ; Clear root directory
     mov edi, dir_buffer
     mov ecx, 512 * 14
     xor al, al
     rep stosb
-    ; Write root directory
     mov eax, [selected_partition_start]
-    add eax, 32                                 ; Reserved sectors
-    add eax, [sector_buffer + 36]              ; FAT1 start
-    add eax, [sector_buffer + 36]              ; FAT2 start
+    add eax, 32
+    add eax, [sector_buffer + 36]
+    add eax, [sector_buffer + 36]
     mov [root_dir_start], eax
-    mov ecx, 1                                  ; 1 cluster
+    mov ecx, 1
     mov esi, dir_buffer
     call ide_write_sectors
-    ; Zero fill data area (low-level format)
     mov eax, [selected_partition_start]
-    add eax, 32                                 ; Reserved sectors
-    add eax, [sector_buffer + 36]              ; FAT1 size
-    add eax, [sector_buffer + 36]              ; FAT2 size
+    add eax, 32
+    add eax, [sector_buffer + 36]
+    add eax, [sector_buffer + 36]
     mov [fmt_zero_lba], eax
     mov eax, [selected_partition_size]
-    sub eax, 32                                 ; Reserved sectors
-    sub eax, [sector_buffer + 36]              ; FAT1 size
-    sub eax, [sector_buffer + 36]              ; FAT2 size
+    sub eax, 32
+    sub eax, [sector_buffer + 36]
+    sub eax, [sector_buffer + 36]
     jle .zero_done
     mov [fmt_zero_count], eax
     mov edi, dir_buffer
@@ -2468,9 +2476,7 @@ format_fat32:
     jmp .zero_loop
 .zero_done:
     call load_boot_sector
-    mov eax, [root_dir_start]
-    mov [current_dir_cluster], dword 0
-    mov [current_dir_sector], eax
+    call set_root_dir
     popa
     ret
     pusha
@@ -2506,6 +2512,8 @@ get_next_cluster:
     push ebx
     push ecx
     push edx
+    cmp byte [fs_type], 1
+    je .fat32
     mov ebx, eax
     shl eax, 1
     add eax, ebx
@@ -2517,6 +2525,11 @@ get_next_cluster:
     jmp .done
 .even:
     and ecx, 0x0FFF
+    jmp .done
+.fat32:
+    shl eax, 2
+    mov ecx, [fat_buffer + eax]
+    and ecx, 0x0FFFFFFF
 .done:
     mov eax, ecx
     pop edx
@@ -2525,6 +2538,8 @@ get_next_cluster:
     ret
 set_next_cluster:
     pusha
+    cmp byte [fs_type], 1
+    je .set_fat32
     mov ecx, eax
     shl eax, 1
     add eax, ecx
@@ -2543,8 +2558,35 @@ set_next_cluster:
     and ebx, 0x0FFF
     or ecx, ebx
     mov [fat_buffer + eax], cx
+    jmp .done
+.set_fat32:
+    shl eax, 2
+    mov ecx, [fat_buffer + eax]
+    and ecx, 0xF0000000
+    and ebx, 0x0FFFFFFF
+    or ecx, ebx
+    mov [fat_buffer + eax], ecx
 .done:
     popa
+    ret
+set_eof_marker:
+    push eax
+    cmp byte [fs_type], 1
+    jne .sem_fat12
+    mov ebx, 0x0FFFFFFF
+    jmp .sem_done
+.sem_fat12:
+    mov ebx, 0x0FFF
+.sem_done:
+    pop eax
+    ret
+cluster_is_eof:
+    cmp byte [fs_type], 1
+    je .cie_fat32
+    cmp eax, 0x0FF8
+    ret
+.cie_fat32:
+    cmp eax, 0x0FFFFFF8
     ret
 find_free_cluster:
     push ebx
@@ -2556,8 +2598,9 @@ find_free_cluster:
     cmp eax, 0
     je .found
     inc ecx
-    cmp ecx, 4085
+    cmp ecx, [fat_max_cluster]
     jl .search_loop
+.full:
     xor eax, eax
     jmp .done
 .found:
@@ -2571,7 +2614,7 @@ allocate_cluster:
     call find_free_cluster
     cmp eax, 0
     je .done
-    mov ebx, 0x0FFF
+    call set_eof_marker
     call set_next_cluster
 .done:
     pop ebx
@@ -2720,10 +2763,6 @@ filename_to_83:
 .done:
     popa
     ret
-;=============================================================================
-; File Operations - Read, write, create, delete files
-;=============================================================================
-
 read_dir_sector:
     pusha
     cmp dword [current_dir_cluster], 0
@@ -2737,6 +2776,9 @@ read_dir_sector:
     xor edx, edx
     div ecx
     mov ecx, eax
+    cmp ecx, 14
+    jbe .do_read
+    mov ecx, 14
     jmp .do_read
 .one_sector:
     mov ecx, 1
@@ -2748,7 +2790,6 @@ read_dir_sector:
     ret
 
 list_directory:
-    ; List all files in current directory
     pusha
     call read_dir_sector
     mov esi, ls_header
@@ -2757,6 +2798,9 @@ list_directory:
     cmp dword [current_dir_cluster], 0
     jne .data_dir
     mov ecx, [fat_root_entries]
+    cmp ecx, 224
+    jbe .list
+    mov ecx, 224
     jmp .list
 .data_dir:
     mov ecx, DIRS_PER_SECT
@@ -2776,6 +2820,8 @@ list_directory:
     je .done
     mov al, [edi + 11]
     test al, 0x08
+    jnz .next
+    test al, 0x02
     jnz .next
     push ebx
     push ecx
@@ -2831,21 +2877,28 @@ list_directory:
     mov al, ' '
     call print_char
     mov eax, [edi + 28]
-    mov ecx, 1024
-    xor edx, edx
-    div ecx
-    push eax
-    call count_digits
-    mov ecx, 6
-    sub ecx, eax
+    call format_size_str
+    push edi
+    mov esi, fm_tmp_str
+    call str_len
+    mov ebx, eax
+    pop edi
+    mov ecx, 8
+    sub ecx, ebx
     jle .size_pad_done
 .size_pad_loop:
     mov al, ' '
     call print_char
     loop .size_pad_loop
 .size_pad_done:
-    pop eax
-    call print_number
+    mov esi, fm_tmp_str
+.size_print:
+    lodsb
+    cmp al, 0
+    je .size_done
+    call print_char
+    jmp .size_print
+.size_done:
     mov esi, newline
     call print32
     pop ecx
@@ -2871,7 +2924,7 @@ read_file:
     jnz .is_dir
     movzx eax, word [edi + 26]
 .read_loop:
-    cmp eax, 0x0FF8
+    call cluster_is_eof
     jae .done_read
     cmp eax, 2
     jb .done_read
@@ -2914,6 +2967,14 @@ write_file:
     mov edi, tmp_filename
     call filename_to_83
     pop esi
+    cmp byte [tmp_filename + 8], 'S'
+    jne .not_sys
+    cmp byte [tmp_filename + 9], 'Y'
+    jne .not_sys
+    cmp byte [tmp_filename + 10], 'S'
+    jne .not_sys
+    jmp .sys_blocked
+.not_sys:
     push esi
     mov esi, tmp_filename
     call find_dir_entry
@@ -2926,8 +2987,15 @@ write_file:
 .find_last:
     mov eax, ebx
     call get_next_cluster
+    cmp byte [fs_type], 1
+    jne .fl_fat12
+    cmp eax, 0x0FFFFFF8
+    jae .found_last
+    jmp .fl_cont
+.fl_fat12:
     cmp eax, 0x0FF8
     jae .found_last
+.fl_cont:
     mov ebx, eax
     jmp .find_last
 .found_last:
@@ -2940,7 +3008,7 @@ write_file:
     call set_next_cluster
     pop eax
     push eax
-    mov ebx, 0x0FFF
+    call set_eof_marker
     call set_next_cluster
     pop eax
     call write_fat
@@ -2973,7 +3041,7 @@ write_file:
     mov ebx, eax
     push ebx
     mov eax, ebx
-    mov ebx, 0x0FFF
+    call set_eof_marker
     call set_next_cluster
     pop ebx
     call write_fat
@@ -3017,6 +3085,10 @@ write_file:
 .dir_full:
     mov esi, msg_dir_full
     call print32
+    jmp .done
+.sys_blocked:
+    mov esi, msg_sys_blocked
+    call print32
 .done:
     popa
     ret
@@ -3048,7 +3120,7 @@ create_directory:
     mov ebx, eax
     push ebx
     mov eax, ebx
-    mov ebx, 0x0FFF
+    call set_eof_marker
     call set_next_cluster
     pop ebx
     call write_fat
@@ -3124,7 +3196,8 @@ delete_directory:
     jz .not_dir
     movzx ebx, word [edi + 26]
 .free_loop:
-    cmp ebx, 0x0FF8
+    mov eax, ebx
+    call cluster_is_eof
     jae .free_done
     cmp ebx, 2
     jb .free_done
@@ -3167,7 +3240,8 @@ delete_file:
     jnz .is_dir
     movzx ebx, word [edi + 26]
 .free_loop:
-    cmp ebx, 0x0FF8
+    mov eax, ebx
+    call cluster_is_eof
     jae .free_done
     cmp ebx, 2
     jb .free_done
@@ -3195,12 +3269,263 @@ delete_file:
     call print32
     popa
     ret
-;=============================================================================
-; Drive Letter Management
-;=============================================================================
+
+dl_sys_name         db 'DL.SYS', 0
+dl_sys_auto         db 'AUTO', 0
+
+dl_sys_read:
+    pusha
+    mov dword [dl_sys_result], 0
+    mov eax, [current_dir_cluster]
+    mov [dl_sys_save_cluster], eax
+    mov eax, [current_dir_sector]
+    mov [dl_sys_save_sector], eax
+    call set_root_dir
+    cmp byte [fs_type], 1
+    jne .dsr_normal
+    movzx ecx, byte [fat_sectors_per_cluster]
+    cmp ecx, 14
+    jbe .dsr_readroot
+    mov ecx, 14
+.dsr_readroot:
+    mov eax, [current_dir_sector]
+    mov edi, dir_buffer
+    call ide_read_sectors
+    jmp .dsr_search
+.dsr_normal:
+    call read_dir_sector
+.dsr_search:
+    mov esi, dl_sys_name
+    mov edi, tmp_filename
+    call filename_to_83
+    mov ecx, 224
+    xor ebx, ebx
+.dsr_scan:
+    cmp ebx, ecx
+    jge .not_found
+    mov edi, dir_buffer
+    mov eax, ebx
+    mov edx, 32
+    mul edx
+    add edi, eax
+    cmp byte [edi], 0xE5
+    je .dsr_next
+    cmp byte [edi], 0
+    je .not_found
+    push esi
+    push edi
+    mov ecx, 11
+    mov esi, tmp_filename
+    repe cmpsb
+    pop edi
+    pop esi
+    je .dsr_found
+.dsr_next:
+    inc ebx
+    jmp .dsr_scan
+.dsr_found:
+    movzx eax, word [edi + 26]
+    cmp eax, 2
+    jb .not_found
+    call cluster_to_lba
+    mov ecx, 1
+    mov edi, sector_buffer
+    call ide_read_sectors
+    mov esi, sector_buffer
+    lodsb
+    cmp al, '['
+    jne .not_found
+    lodsb
+    cmp al, 'A'
+    jb .not_found
+    cmp al, 'Z'
+    ja .not_found
+    mov [dl_sys_result], al
+.not_found:
+    mov eax, [dl_sys_save_cluster]
+    mov [current_dir_cluster], eax
+    mov eax, [dl_sys_save_sector]
+    mov [current_dir_sector], eax
+    popa
+    mov al, [dl_sys_result]
+    ret
+
+dl_sys_write:
+    pusha
+    mov [dl_sys_letter], al
+    mov eax, [current_dir_cluster]
+    mov [dl_sys_save_cluster], eax
+    mov eax, [current_dir_sector]
+    mov [dl_sys_save_sector], eax
+    call set_root_dir
+    cmp byte [fs_type], 1
+    jne .dsw_normal
+    movzx ecx, byte [fat_sectors_per_cluster]
+    cmp ecx, 14
+    jbe .dsw_readroot
+    mov ecx, 14
+.dsw_readroot:
+    mov eax, [current_dir_sector]
+    mov edi, dir_buffer
+    call ide_read_sectors
+    mov [dsw_root_sectors], ecx
+    jmp .dsw_search
+.dsw_normal:
+    call read_dir_sector
+    mov dword [dsw_root_sectors], 0
+.dsw_search:
+    mov esi, dl_sys_name
+    mov edi, tmp_filename
+    call filename_to_83
+    mov ecx, 224
+    xor ebx, ebx
+.dsw_scan:
+    cmp ebx, ecx
+    jge .dsw_not_found
+    mov edi, dir_buffer
+    mov eax, ebx
+    mov edx, 32
+    mul edx
+    add edi, eax
+    cmp byte [edi], 0xE5
+    je .dsw_scan_next
+    cmp byte [edi], 0
+    je .dsw_not_found
+    push esi
+    push edi
+    mov ecx, 11
+    mov esi, tmp_filename
+    repe cmpsb
+    pop edi
+    pop esi
+    je .dsw_found
+.dsw_scan_next:
+    inc ebx
+    jmp .dsw_scan
+.dsw_found:
+    movzx eax, word [edi + 26]
+    cmp eax, 2
+    jae .dsw_write_content
+.dsw_not_found:
+    call find_free_cluster
+    cmp eax, 0
+    je .done
+    mov ebx, eax
+    push ebx
+    mov eax, ebx
+    call set_eof_marker
+    call set_next_cluster
+    pop ebx
+    call write_fat
+    mov ecx, 224
+    xor ebx, ebx
+.dsw_find_free:
+    cmp ebx, ecx
+    jge .done
+    mov edi, dir_buffer
+    mov eax, ebx
+    mov edx, 32
+    mul edx
+    add edi, eax
+    cmp byte [edi], 0xE5
+    je .dsw_got_free
+    cmp byte [edi], 0
+    je .dsw_got_free
+    inc ebx
+    jmp .dsw_find_free
+.dsw_got_free:
+    push esi
+    mov esi, tmp_filename
+    mov ecx, 11
+    rep movsb
+    pop esi
+    mov byte [edi - 11 + 11], 0x02
+    mov word [edi - 11 + 26], bx
+    mov dword [edi - 11 + 28], 5
+    cmp dword [dsw_root_sectors], 0
+    je .dsw_write_dir_normal
+    mov eax, [current_dir_sector]
+    mov ecx, [dsw_root_sectors]
+    mov esi, dir_buffer
+    call ide_write_sectors
+    jmp .dsw_dir_written
+.dsw_write_dir_normal:
+    call write_dir_sector
+.dsw_dir_written:
+    mov eax, ebx
+.dsw_write_content:
+    call cluster_to_lba
+    mov ecx, 1
+    mov edi, sector_buffer
+    push edi
+    mov ecx, 512
+    xor al, al
+    rep stosb
+    pop edi
+    mov al, [dl_sys_letter]
+    cmp al, 0
+    je .write_auto
+    mov byte [edi], '['
+    mov byte [edi + 1], al
+    mov byte [edi + 2], ']'
+    mov byte [edi + 3], 0
+    jmp .do_write
+.write_auto:
+    mov byte [edi], 'A'
+    mov byte [edi + 1], 'U'
+    mov byte [edi + 2], 'T'
+    mov byte [edi + 3], 'O'
+    mov byte [edi + 4], 0
+.do_write:
+    mov esi, sector_buffer
+    call ide_write_sectors
+.done:
+    mov eax, [dl_sys_save_cluster]
+    mov [current_dir_cluster], eax
+    mov eax, [dl_sys_save_sector]
+    mov [current_dir_sector], eax
+    popa
+    ret
+
+dsw_root_sectors     dd 0
+
+dl_sys_result       db 0
+dl_sys_letter       db 0
+dl_sys_save_cluster dd 0
+dl_sys_save_sector  dd 0
+
+assign_fixed_drive_letter:
+    pusha
+    mov [fixed_letter], al
+    mov byte [fixed_result], 0
+    movzx ecx, al
+    sub ecx, 'A'
+    cmp ecx, 1
+    jb .done
+    cmp ecx, MAX_DRIVES
+    jge .done
+    mov eax, ecx
+    shl eax, 4
+    cmp byte [drive_table + eax], 0
+    jne .done
+    mov byte [drive_table + eax], 1
+    mov al, [fixed_letter]
+    mov byte [drive_table + eax + 1], al
+    mov al, [selected_disk]
+    mov byte [drive_table + eax + 2], al
+    mov al, [selected_partition]
+    mov byte [drive_table + eax + 3], al
+    mov eax, [selected_partition_start]
+    mov dword [drive_table + eax + 4], eax
+    mov byte [fixed_result], 1
+.done:
+    popa
+    mov al, [fixed_result]
+    ret
+fixed_letter        db 0
+fixed_result        db 0
 
 init_drive_table:
-    ; Initialize drive table with default system drive A:
     pusha
     mov edi, drive_table
     mov ecx, MAX_DRIVES * 16
@@ -3253,6 +3578,22 @@ assign_drive_letter:
 .done:
     popa
     ret
+set_root_dir:
+    pusha
+    cmp byte [fs_type], 1
+    jne .fat12_root
+    mov eax, [fat_root_cluster]
+    mov [current_dir_cluster], eax
+    call cluster_to_lba
+    mov [current_dir_sector], eax
+    jmp .done
+.fat12_root:
+    mov dword [current_dir_cluster], 0
+    mov eax, [root_dir_start]
+    mov [current_dir_sector], eax
+.done:
+    popa
+    ret
 switch_drive:
     pusha
     mov [tmp_drive_letter], al
@@ -3288,9 +3629,7 @@ switch_drive:
     mov eax, [drive_table + ebx + 4]
     mov [selected_partition_start], eax
     call load_boot_sector
-    mov eax, [root_dir_start]
-    mov dword [current_dir_cluster], 0
-    mov dword [current_dir_sector], eax
+    call set_root_dir
     jmp .set_path
 .is_a:
     mov byte [selected_disk], 0xFF
@@ -3376,13 +3715,113 @@ dl_list_cmd:
 .done:
     popa
     ret
+
+dl_set_this_cmd:
+    pusha
+    mov esi, input_buf
+    add esi, 11
+    call skip_spaces_esi
+    mov al, [esi]
+    cmp al, 0
+    je .no_arg
+    cmp al, 'a'
+    jb .check_upper
+    cmp al, 'z'
+    ja .check_upper
+    sub al, 32
+.check_upper:
+    cmp al, 'B'
+    jb .invalid
+    mov ecx, MAX_DRIVES - 1
+    add ecx, 'A'
+    cmp al, cl
+    ja .invalid
+    mov [dl_set_new], al
+    movzx ebx, byte [current_drive]
+    shl ebx, 4
+    cmp byte [drive_table + ebx], 0
+    je .no_current
+    mov al, [drive_table + ebx + 1]
+    mov [dl_set_old], al
+    movzx ecx, byte [dl_set_new]
+    sub ecx, 'A'
+    mov eax, ecx
+    shl eax, 4
+    cmp byte [drive_table + eax], 0
+    je .slot_free
+    mov al, [drive_table + eax + 1]
+    cmp al, [dl_set_old]
+    je .slot_free
+    mov esi, msg_drive_letter_used
+    call print32
+    jmp .done
+.slot_free:
+    mov al, [drive_table + ebx + 2]
+    mov [selected_disk], al
+    mov al, [drive_table + ebx + 3]
+    mov [selected_partition], al
+    mov eax, [drive_table + ebx + 4]
+    mov [selected_partition_start], eax
+    call ide_select_disk
+    call load_boot_sector
+    mov al, [dl_set_new]
+    call dl_sys_write
+    mov byte [drive_table + ebx], 0
+    movzx ecx, byte [dl_set_new]
+    sub ecx, 'A'
+    mov esi, ecx
+    shl esi, 4
+    mov byte [drive_table + esi], 1
+    mov al, [dl_set_new]
+    mov byte [drive_table + esi + 1], al
+    mov al, [selected_disk]
+    mov byte [drive_table + esi + 2], al
+    mov al, [selected_partition]
+    mov byte [drive_table + esi + 3], al
+    mov edx, [selected_partition_start]
+    mov [drive_table + esi + 4], edx
+    mov al, [dl_set_new]
+    call switch_drive
+    mov esi, msg_drive_letter_set
+    call print32
+    mov al, [dl_set_old]
+    call print_char
+    mov esi, msg_drive_arrow
+    call print32
+    mov al, [dl_set_new]
+    call print_char
+    mov esi, newline
+    call print32
+    jmp .done
+.no_current:
+    mov esi, msg_no_current_drive
+    call print32
+    jmp .done
+.no_arg:
+    mov esi, msg_no_drive_letter
+    call print32
+    jmp .done
+.invalid:
+    mov esi, msg_invalid_drive_letter
+    call print32
+.done:
+    popa
+    ret
+
+dl_set_new          db 0
+dl_set_old          db 0
+msg_drive_letter_set db 'Drive letter set: ', 0
+msg_drive_arrow     db ' -> ', 0
+msg_drive_letter_used db 'Error: drive letter already in use.', 0x0d, 0x0a, 0
+msg_no_current_drive db 'Error: no current drive.', 0x0d, 0x0a, 0
+msg_no_drive_letter db 'Error: no drive letter specified.', 0x0d, 0x0a, 0
+msg_invalid_drive_letter db 'Error: invalid drive letter (use A-Z).', 0x0d, 0x0a, 0
+
 cd_to_root:
     pusha
     cmp byte [selected_partition], 0xFF
     je .set_path_only
-    mov eax, [root_dir_start]
-    mov dword [current_dir_cluster], 0
-    mov dword [current_dir_sector], eax
+    call set_root_dir
 .set_path_only:
     mov ebx, 0
     mov bl, [current_drive]
@@ -3491,8 +3930,7 @@ cd_directory:
     call update_path_up
     jmp .done
 .to_root:
-    mov eax, [root_dir_start]
-    mov [current_dir_sector], eax
+    call set_root_dir
     mov ebx, 0
     mov bl, [current_drive]
     shl ebx, 4
@@ -3520,9 +3958,11 @@ cd_directory:
     call cluster_to_lba
     jmp .set_sector
 .root_cluster:
-    mov eax, [root_dir_start]
+    call set_root_dir
+    jmp .after_sector
 .set_sector:
     mov [current_dir_sector], eax
+.after_sector:
     call update_path_down
     jmp .done
 .not_found:
@@ -3921,9 +4361,7 @@ part_select:
     mov esi, newline
     call print32
     call load_boot_sector
-    mov eax, [root_dir_start]
-    mov [current_dir_cluster], dword 0
-    mov [current_dir_sector], eax
+    call set_root_dir
     popa
     ret
 .no_disk:
@@ -3947,57 +4385,66 @@ part_select:
     popa
     ret
 part_format:
-    ; Format selected partition
-    ; Usage: part fm [-fs fat12|fat32]
-    ; Default filesystem is FAT12 if -fs not specified
     pusha
     cmp byte [selected_partition], 0xFF
     je .no_part
-    ; Parse command line for -fs parameter
     mov esi, input_buf
-    add esi, 7                                  ; Skip "part fm"
-    mov byte [fmt_filesystem], 0                ; Default: FAT12
+    add esi, 7
+    mov byte [fmt_filesystem], 0
 .find_fs:
     lodsb
     cmp al, 0
     je .do_format
     cmp al, '-'
     jne .find_fs
-    ; Check for "fs" after '-'
     cmp byte [esi], 'f'
     jne .find_fs
     cmp byte [esi + 1], 's'
     jne .find_fs
-    add esi, 2                                  ; Skip "fs"
-    ; Skip spaces
+    add esi, 2
 .skip_spaces:
     cmp byte [esi], ' '
     jne .check_fs
     inc esi
     jmp .skip_spaces
 .check_fs:
-    ; Check for "fat12" or "fat32"
-    cmp dword [esi], 0x31746166                  ; "fat1" (little-endian)
+    cmp dword [esi], 0x31746166
     jne .check_fat32
     cmp byte [esi + 4], '2'
     jne .check_fat32
-    mov byte [fmt_filesystem], 0                ; FAT12
+    mov byte [fmt_filesystem], 0
     jmp .do_format
 .check_fat32:
-    cmp dword [esi], 0x33746166                  ; "fat3" (little-endian)
+    cmp dword [esi], 0x33746166
     jne .do_format
     cmp byte [esi + 4], '2'
     jne .do_format
-    mov byte [fmt_filesystem], 1                ; FAT32
+    mov byte [fmt_filesystem], 1
 .do_format:
     cmp byte [fmt_filesystem], 0
     je .format_fat12
     call format_fat32
+    mov byte [mbr_part_type], 0x0B
     jmp .format_done
 .format_fat12:
     call format_fat12
+    mov byte [mbr_part_type], 0x01
 .format_done:
+    movzx eax, byte [selected_partition]
+    cmp al, 0xFF
+    je .skip_type
+    shl eax, 4
+    mov bl, [mbr_part_type]
+    mov [partition_table + eax + 4], bl
+    call write_mbr_from_table
+.skip_type:
+    cmp byte [fmt_filesystem], 0
+    je .fmt_msg12
+    mov esi, msg_formatted_fat32
+    jmp .fmt_msg_print
+.fmt_msg12:
     mov esi, msg_formatted
+.fmt_msg_print:
     call print32
     call assign_drive_letter
     popa
@@ -4007,7 +4454,8 @@ part_format:
     call print32
     popa
     ret
-fmt_filesystem db 0                             ; 0=FAT12, 1=FAT32
+fmt_filesystem db 0; 0=FAT12, 1=FAT32
+mbr_part_type  db 0
 part_del:
     pusha
     cmp byte [selected_disk], 0xFF
@@ -4269,6 +4717,8 @@ dedir_cmd:
     jz .wc_next_entry
     test al, 0x08
     jnz .wc_next_entry
+    test al, 0x02
+    jnz .wc_next_entry
     cmp byte [edi], '.'
     jne .wc_not_dot
     cmp byte [edi + 1], ' '
@@ -4350,6 +4800,8 @@ del_cmd:
     jnz .wc_next_entry
     test al, 0x08
     jnz .wc_next_entry
+    test al, 0x02
+    jnz .wc_next_entry
     cmp byte [edi], '.'
     jne .wc_not_dot
     cmp byte [edi + 1], ' '
@@ -4390,14 +4842,7 @@ del_cmd:
     call print32
     popa
     ret
-;=============================================================================
-; Path Resolution and Directory Navigation
-;=============================================================================
-
 resolve_path_to_dir:
-    ; Resolve a path string to directory location
-    ; Input: [ebp+8] = path string pointer
-    ; Output: eax = 0 on success, -1 on failure
     push ebp
     mov ebp, esp
     sub esp, 160
@@ -4507,12 +4952,7 @@ resolve_path_to_dir:
     mov esp, ebp
     pop ebp
     ret
-;=============================================================================
-; Auto-Mount - Detect and mount all partitions on boot
-;=============================================================================
-
 auto_mount:
-    ; Scan all disks and partitions, assign drive letters
     pusha
     mov byte [selected_disk], 0
 .mount_disk_loop:
@@ -4544,6 +4984,13 @@ auto_mount:
     je .next_part
     cmp word [fat_reserved_sectors], 0
     je .next_part
+    call dl_sys_read
+    cmp al, 0
+    je .auto_assign
+    call assign_fixed_drive_letter
+    cmp al, 1
+    je .next_part
+.auto_assign:
     call assign_drive_letter
 .next_part:
     inc byte [selected_partition]
@@ -4577,26 +5024,30 @@ fat_sectors_per_cluster  db 0
 fat_reserved_sectors     dw 0
 fat_num_fats             db 0
 fat_root_entries         dw 0
-fat_sectors_per_fat      dw 0
+fat_sectors_per_fat      dd 0
 fat_total_sectors        dd 0
+fat_max_cluster        dd 0
+fat_root_cluster         dd 0
+fs_type                  db 0
 fat1_start               dd 0
 root_dir_start           dd 0
 data_area_start          dd 0
 current_dir_cluster      dd 0
 current_dir_sector       dd 0
+FAT_BUFFER_SECTORS       equ 16
 sector_buffer        times 512 db 0
 dir_buffer           times 7168 db 0
-fat_buffer           times 4608 db 0
+fat_buffer           times 8192 db 0
 identify_buffer      times 512 db 0
 tmp_filename         times 12 db 0
 current_path         times 128 db 0
 tmp_lba              dd 0
 tmp_count            dd 0
 tmp_buffer           dd 0
-ls_header            db 'Name          Type  Size(KB)', 0x0d, 0x0a, 0
+ls_header            db 'Name          Type        Size', 0x0d, 0x0a, 0
 type_dir             db 'DIR ', 0
 type_file            db 'FILE', 0
-drive_table          times 256 db 0
+drive_table          times 416 db 0
 current_drive        db 0
 tmp_drive_letter     db 0
 tmp_component        times 16 db 0
@@ -4608,6 +5059,7 @@ msg_no_free_part     db 'No free partition entry.', 0x0d, 0x0a, 0
 mbr_free_entry       dd 0
 mbr_max_end          dd 0
 mbr_new_start        dd 0
+mbr_new_slot         dd 0
 mbr_new_size         dd 0
 pl_part_count        dd 0
 pl_swap_t1           dd 0
@@ -4617,6 +5069,7 @@ pl_outer_count        dd 0
 msg_part_list        db 'Partitions:', 0x0d, 0x0a, 0
 msg_part_selected    db 'Partition selected: ', 0
 msg_formatted        db 'Partition formatted as FAT12.', 0x0d, 0x0a, 0
+msg_formatted_fat32  db 'Partition formatted as FAT32.', 0x0d, 0x0a, 0
 msg_no_disk_num      db 'Usage: disk sel <number>', 0x0d, 0x0a, 0
 msg_invalid_disk     db 'Invalid disk number.', 0x0d, 0x0a, 0
 msg_disk_not_present db 'Disk not present.', 0x0d, 0x0a, 0
@@ -4637,18 +5090,14 @@ msg_not_found        db 'Not found.', 0x0d, 0x0a, 0
 msg_not_directory    db 'Not a directory.', 0x0d, 0x0a, 0
 msg_disk_full        db 'Disk full.', 0x0d, 0x0a, 0
 msg_dir_full         db 'Directory full.', 0x0d, 0x0a, 0
+msg_sys_blocked      db 'Error: .SYS files are protected.', 0x0d, 0x0a, 0
 msg_written          db 'File written.', 0x0d, 0x0a, 0
 msg_drive_assigned   db 'Drive assigned: ', 0
 msg_drive_not_found  db 'Drive not found.', 0x0d, 0x0a, 0
 msg_drive_list       db 'Drives:', 0x0d, 0x0a, 0
 msg_drive_part       db 'Disk ', 0
 msg_drive_system     db 'System VHD', 0
-;=============================================================================
-; Memory Management - Bitmap allocator for page frames
-;=============================================================================
-
 mem_init:
-    ; Initialize memory bitmap (512 pages = 2MB)
     pusha
     mov edi, 0x120000
     mov ecx, 512
@@ -4821,13 +5270,7 @@ paging_init:
     mov cr0, eax
     popa
     ret
-;=============================================================================
-; Process Management - PCB initialization and scheduling
-;=============================================================================
-
 proc_init:
-    ; Initialize process control blocks (8 slots)
-    ; Slot 0: idle process, Slot 1: shell process
     pusha
     mov edi, 0x110000
     mov ecx, 128
@@ -5095,16 +5538,17 @@ help_page1_sys:
     db 'help [n]   - Show help page n',0
 help_page1_count equ 13
 help_page2_disk:
-    db 'dl list    - List drive letters',0
-    db 'disk list  - List disk drives',0
-    db 'disk sel   - Select disk drive',0
-    db 'disk part  - Partition disk (-size MB)',0
-    db 'disk del allpart - Delete all partitions',0
-    db 'part list  - List partitions',0
-    db 'part sel   - Select partition',0
-    db 'part fm    - Format partition (-fs fat12|fat32)',0
-    db 'part del   - Delete partition',0
-help_page2_count equ 9
+    db 'dl list              - List drive letters',0
+    db 'dl set this <letter> - Set current drive letter',0
+    db 'disk list            - List disk drives',0
+    db 'disk sel             - Select disk drive',0
+    db 'disk part            - Partition disk (-size MB)',0
+    db 'disk del allpart     - Delete all partitions',0
+    db 'part list            - List partitions',0
+    db 'part sel             - Select partition',0
+    db 'part fm              - Format partition (-fs fat12|fat32)',0
+    db 'part del             - Delete partition',0
+help_page2_count equ 10
 help_page3_file:
     db 'ls         - List directory',0
     db 'cd         - Change directory',0
@@ -5234,12 +5678,7 @@ hex_to_nibble:
     add al, 10
     ret
 color_usage_msg db 'Usage: color [bg][fg] (hex digits, e.g. color 0f)', 0x0d, 0x0a, 0
-;=============================================================================
-; TUI (Text User Interface) - Main menu and application launcher
-;=============================================================================
-
 tui_cmd:
-    ; Enter TUI mode - main menu with application icons
     cli
     call clear_screen
     pusha
@@ -6013,20 +6452,15 @@ calc_draw:
 bcd_to_bin:
     push ebx
     mov bl, al
-    shr bl, 4          ; bl = tens digit
-    and al, 0x0F       ; al = ones digit
+    shr bl, 4
+    and al, 0x0F
     mov cl, 10
-    xchg al, bl        ; al = tens, bl = ones
-    mul cl             ; ax = tens * 10
-    add al, bl         ; al = tens*10 + ones
+    xchg al, bl
+    mul cl
+    add al, bl
     and eax, 0xFF
     pop ebx
     ret
-
-;=============================================================================
-; Calendar Application - Perpetual Calendar with RTC support
-;=============================================================================
-
 calendar_app:
     pusha
     call clear_screen
@@ -6073,7 +6507,6 @@ cal_draw_final:
     mov ax, 0x1F20
     rep stosw
 
-    ; Draw title: "Month Year" centered
     mov edi, 0xB8000 + 1*160 + 20*2
     movzx eax, byte [cal_month]
     dec eax
@@ -6087,13 +6520,11 @@ cal_draw_final:
     mov ax, [cal_year]
     call print_dec
 
-    ; Draw weekday header
     mov edi, 0xB8000 + 3*160 + 10*2
     mov esi, cal_str_weekdays
     mov ah, 0x1F
     call tui_put_str
 
-    ; Calculate first day of month and days in month
     movzx eax, byte [cal_month]
     movzx ebx, word [cal_year]
     call cal_calc_first_day
@@ -6103,7 +6534,6 @@ cal_draw_final:
     call cal_days_in_month
     mov [cal_days], eax
 
-    ; Draw calendar grid and days
     mov byte [cal_v2_row], 5
     mov byte [cal_v2_col], 10
     movzx ecx, byte [cal_first_day]
@@ -6171,47 +6601,38 @@ cal_v2_row         db 0
 cal_v2_col         db 0
 
 cal_calc_first_day:
-    ; Zeller's congruence for Gregorian calendar
-    ; Input: eax = month (1-12), ebx = year
-    ; Output: eax = day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
     pusha
-    mov ecx, eax          ; ecx = month
-    mov eax, ebx          ; eax = year
-    ; If month is Jan or Feb, treat as month 13/14 of previous year
+    mov ecx, eax
+    mov eax, ebx
     cmp ecx, 3
     jge .ccf_no_adj
-    dec eax               ; year--
-    add ecx, 12           ; month += 12
+    dec eax
+    add ecx, 12
 .ccf_no_adj:
-    ; eax = adjusted year, ecx = adjusted month
     mov [cal_tmp_year], eax
     mov [cal_tmp_month], ecx
-    ; Calculate K = year % 100
     xor edx, edx
     mov ebx, 100
     div ebx
-    mov [cal_tmp_year2], edx    ; K = year % 100
-    mov [cal_tmp_century], eax  ; J = year / 100
-    ; Zeller's formula: h = (1 + (13*(m+1))/5 + K + K/4 + J/4 - 2*J) mod 7
-    ; where m is month (3-14), K is year%100, J is year/100
+    mov [cal_tmp_year2], edx
+    mov [cal_tmp_century], eax
     mov eax, [cal_tmp_month]
     inc eax
     imul eax, 13
     mov ebx, 5
     xor edx, edx
-    div ebx               ; eax = (13*(m+1))/5
-    add eax, 1            ; h = 1 + (13*(m+1))/5
-    add eax, [cal_tmp_year2]  ; h += K
+    div ebx
+    add eax, 1
+    add eax, [cal_tmp_year2]
     mov ebx, [cal_tmp_year2]
-    shr ebx, 2            ; K/4
-    add eax, ebx          ; h += K/4
+    shr ebx, 2
+    add eax, ebx
     mov ebx, [cal_tmp_century]
-    shr ebx, 2            ; J/4
-    add eax, ebx          ; h += J/4
+    shr ebx, 2
+    add eax, ebx
     mov ebx, [cal_tmp_century]
-    shl ebx, 1            ; 2*J
-    sub eax, ebx          ; h -= 2*J
-    ; Make positive and mod 7
+    shl ebx, 1
+    sub eax, ebx
     mov ebx, 7
     xor edx, edx
     idiv ebx
@@ -6220,7 +6641,6 @@ cal_calc_first_day:
     jge .ccf_positive
     add eax, 7
 .ccf_positive:
-    ; Convert Zeller output (0=Sat,1=Sun,2=Mon,...) to (0=Sun,1=Mon,...,6=Sat)
     cmp eax, 0
     jne .ccf_not_sat
     mov eax, 6
@@ -6304,7 +6724,7 @@ settings_app:
     dec byte [settings_focus]
     jmp .sett_loop
 .sett_down:
-    cmp byte [settings_focus], 3
+    cmp byte [settings_focus], 2
     je .sett_loop
     inc byte [settings_focus]
     jmp .sett_loop
@@ -6315,15 +6735,10 @@ settings_app:
     cmp al, 1
     je .sett_disk
     cmp al, 2
-    je .sett_dev
-    cmp al, 3
     je .sett_exit
     jmp .sett_loop
 .sett_disk:
     call disk_mgr_app
-    jmp .sett_loop
-.sett_dev:
-    call dev_mgr_app
     jmp .sett_loop
 .sett_calibrate:
     call tui_read_date
@@ -6343,10 +6758,6 @@ settings_app:
     call clear_screen
     popa
     ret
-;=============================================================================
-; Disk Manager - Partition management with FAT12/FAT32 format support
-;=============================================================================
-
 disk_mgr_app:
     pusha
     call clear_screen
@@ -6357,37 +6768,21 @@ disk_mgr_app:
     mov byte [dm_act_sel], 0
     mov byte [dm_show_act], 0
     mov byte [dm_show_new], 0
-    mov byte [dm_new_size], 16
+    mov byte [dm_confirm], 0
+    mov byte [dm_conf_sel], 0
+    mov byte [dm_fs_sel], 1
+    mov dword [dm_new_size], 16
     call dm_count_disks
-    ; Resolve the drive-table slot for the selected disk (dm_disk_sel is a
-    ; 0-based index into dm_disk_list, not a drive-table slot)
-    movzx eax, byte [dm_disk_sel]
-    mov al, [dm_disk_list + eax]
-    shl eax, 4
-    mov al, [drive_table + eax + 2]
-    mov [selected_disk], al
-    call get_disk_size
-    mov eax, [disk_size_sectors]
-    mov ebx, 2048
-    xor edx, edx
-    div ebx
-    mov [dm_disk_size], al
-    movzx eax, byte [dm_disk_sel]
-    mov al, [dm_disk_list + eax]
-    shl eax, 4
-    mov al, [drive_table + eax + 3]
-    mov [selected_partition], al
-    movzx eax, byte [dm_disk_sel]
-    mov al, [dm_disk_list + eax]
-    shl eax, 4
-    mov eax, [drive_table + eax + 4]
-    mov [selected_partition_start], eax
-    call read_mbr
+    cmp byte [dm_disk_count], 0
+    je .dm_nodisk
+    call dm_load_layout
 .dm_loop:
     call dm_draw_final
     call read_scancode
     cmp al, 0x01
     je .dm_exit
+    cmp byte [dm_confirm], 0
+    jne .dm_confirm_mode
     cmp byte [dm_show_new], 1
     je .dm_new_mode
     cmp byte [dm_show_act], 1
@@ -6403,24 +6798,165 @@ disk_mgr_app:
     cmp al, 0x50
     je .dm_down
     jmp .dm_loop
-.dm_new_mode:
+.dm_nodisk:
+    call dm_draw_final
+    call read_scancode
+    cmp al, 0x01
+    je .dm_exit
+    jmp .dm_nodisk
+.dm_confirm_mode:
+    cmp byte [dm_confirm], 1
+    je .dm_conf_delete
+    cmp byte [dm_confirm], 2
+    je .dm_conf_fs
+    jmp .dm_conf_warn
+.dm_conf_delete:
+    cmp al, 0x4B
+    je .dm_conf_del_toggle
+    cmp al, 0x4D
+    je .dm_conf_del_toggle
     cmp al, 0x1C
-    je .dm_new_confirm
+    je .dm_conf_del_enter
+    cmp al, 0x01
+    je .dm_conf_del_esc
+    jmp .dm_loop
+.dm_conf_del_toggle:
+    xor byte [dm_conf_sel], 1
+    jmp .dm_loop
+.dm_conf_del_esc:
+    mov byte [dm_confirm], 0
+    mov byte [dm_conf_sel], 0
+    jmp .dm_loop
+.dm_conf_del_enter:
+    cmp byte [dm_conf_sel], 0
+    jne .dm_conf_del_no
+    call dm_delete_part
+.dm_conf_del_no:
+    mov byte [dm_confirm], 0
+    mov byte [dm_conf_sel], 0
+    jmp .dm_loop
+.dm_conf_fs:
+    cmp al, 0x48
+    je .dm_conf_fs_area_up
+    cmp al, 0x50
+    je .dm_conf_fs_area_down
+    cmp al, 0x4B
+    je .dm_conf_fs_left
+    cmp al, 0x4D
+    je .dm_conf_fs_right
+    cmp al, 0x1C
+    je .dm_conf_fs_enter
+    cmp al, 0x01
+    je .dm_conf_fs_esc
+    jmp .dm_loop
+.dm_conf_fs_area_up:
+    mov byte [dm_fmt_area], 0
+    jmp .dm_loop
+.dm_conf_fs_area_down:
+    mov byte [dm_fmt_area], 1
+    jmp .dm_loop
+.dm_conf_fs_left:
+    cmp byte [dm_fmt_area], 0
+    je .dm_conf_fs_fs_left
+    mov byte [dm_conf_sel], 0
+    jmp .dm_loop
+.dm_conf_fs_fs_left:
+    mov byte [dm_fs_sel], 0
+    jmp .dm_loop
+.dm_conf_fs_right:
+    cmp byte [dm_fmt_area], 0
+    je .dm_conf_fs_fs_right
+    mov byte [dm_conf_sel], 1
+    jmp .dm_loop
+.dm_conf_fs_fs_right:
+    mov byte [dm_fs_sel], 1
+    jmp .dm_loop
+.dm_conf_fs_esc:
+    mov byte [dm_confirm], 0
+    mov byte [dm_conf_sel], 0
+    mov byte [dm_fmt_area], 0
+    jmp .dm_loop
+.dm_conf_fs_enter:
+    cmp byte [dm_fmt_area], 0
+    je .dm_conf_fs_enter_fs
+    cmp byte [dm_conf_sel], 0
+    jne .dm_conf_fs_cancel
+    mov byte [dm_confirm], 3
+    mov byte [dm_conf_sel], 1
+    jmp .dm_loop
+.dm_conf_fs_enter_fs:
+    mov byte [dm_fmt_area], 1
+    jmp .dm_loop
+.dm_conf_fs_cancel:
+    mov byte [dm_confirm], 0
+    mov byte [dm_conf_sel], 0
+    mov byte [dm_fmt_area], 0
+    jmp .dm_loop
+.dm_conf_warn:
+    cmp al, 0x4B
+    je .dm_conf_warn_toggle
+    cmp al, 0x4D
+    je .dm_conf_warn_toggle
+    cmp al, 0x1C
+    je .dm_conf_warn_enter
+    cmp al, 0x01
+    je .dm_conf_warn_esc
+    jmp .dm_loop
+.dm_conf_warn_toggle:
+    xor byte [dm_conf_sel], 1
+    jmp .dm_loop
+.dm_conf_warn_esc:
+    mov byte [dm_confirm], 0
+    mov byte [dm_conf_sel], 0
+    jmp .dm_loop
+.dm_conf_warn_enter:
+    cmp byte [dm_conf_sel], 0
+    jne .dm_conf_warn_cancel
+    call dm_format_part
+.dm_conf_warn_cancel:
+    mov byte [dm_confirm], 0
+    mov byte [dm_conf_sel], 0
+    jmp .dm_loop
+.dm_new_mode:
     cmp al, 0x48
     je .dm_new_up
     cmp al, 0x50
     je .dm_new_down
+    cmp al, 0x4B
+    je .dm_new_toggle
+    cmp al, 0x4D
+    je .dm_new_toggle
+    cmp al, 0x1C
+    je .dm_new_confirm
+    cmp al, 0x01
+    je .dm_new_cancel
     jmp .dm_loop
 .dm_new_up:
-    add byte [dm_new_size], 10
+    inc dword [dm_new_size]
+    mov eax, [dm_new_size]
+    cmp eax, [dm_new_max]
+    jle .dm_loop
+    mov eax, [dm_new_max]
+    mov [dm_new_size], eax
     jmp .dm_loop
 .dm_new_down:
-    cmp byte [dm_new_size], 10
+    cmp dword [dm_new_size], 1
     jle .dm_loop
-    sub byte [dm_new_size], 10
+    dec dword [dm_new_size]
+    jmp .dm_loop
+.dm_new_toggle:
+    xor byte [dm_conf_sel], 1
+    jmp .dm_loop
+.dm_new_cancel:
+    mov byte [dm_show_new], 0
+    mov byte [dm_conf_sel], 0
     jmp .dm_loop
 .dm_new_confirm:
+    cmp byte [dm_conf_sel], 0
+    jne .dm_new_cancel
+    call dm_create_part
     mov byte [dm_show_new], 0
+    mov byte [dm_conf_sel], 0
     jmp .dm_loop
 .dm_act_mode:
     cmp al, 0x1C
@@ -6429,6 +6965,8 @@ disk_mgr_app:
     je .dm_act_up
     cmp al, 0x50
     je .dm_act_down
+    cmp al, 0x01
+    je .dm_act_back
     jmp .dm_loop
 .dm_act_up:
     cmp byte [dm_act_sel], 0
@@ -6436,12 +6974,75 @@ disk_mgr_app:
     dec byte [dm_act_sel]
     jmp .dm_loop
 .dm_act_down:
-    cmp byte [dm_act_sel], 2
-    je .dm_loop
+    call dm_act_count
+    movzx ecx, al
+    mov al, [dm_act_sel]
+    inc al
+    cmp al, cl
+    jge .dm_loop
     inc byte [dm_act_sel]
+    jmp .dm_loop
+.dm_act_back:
+    mov byte [dm_show_act], 0
     jmp .dm_loop
 .dm_act_enter:
     mov byte [dm_show_act], 0
+    movzx eax, byte [dm_part_sel]
+    movzx ebx, byte [dm_part_count]
+    cmp al, bl
+    je .dm_act_free
+    cmp byte [dm_act_sel], 0
+    je .dm_act_del
+    cmp byte [dm_act_sel], 1
+    je .dm_act_fmt
+    jmp .dm_loop
+.dm_act_del:
+    mov byte [dm_confirm], 1
+    mov byte [dm_conf_sel], 1
+    jmp .dm_loop
+.dm_act_fmt:
+    mov byte [dm_confirm], 2
+    mov byte [dm_conf_sel], 0
+    mov byte [dm_fs_sel], 1
+    jmp .dm_loop
+.dm_act_free:
+    cmp byte [dm_act_sel], 0
+    je .dm_act_new
+    jmp .dm_loop
+.dm_act_new:
+    mov byte [dm_show_new], 1
+    mov byte [dm_conf_sel], 0
+    mov dword [mbr_max_end], 2048
+    xor ecx, ecx
+.dan_endloop:
+    cmp ecx, 4
+    jge .dan_enddone
+    mov eax, ecx
+    shl eax, 4
+    cmp byte [partition_table + eax], 0
+    je .dan_endnext
+    mov eax, [partition_table + eax + 8]
+    add eax, [partition_table + eax + 12]
+    cmp eax, [mbr_max_end]
+    jle .dan_endnext
+    mov [mbr_max_end], eax
+.dan_endnext:
+    inc ecx
+    jmp .dan_endloop
+.dan_enddone:
+    mov eax, [disk_size_sectors]
+    sub eax, [mbr_max_end]
+    mov ecx, 2048
+    xor edx, edx
+    div ecx
+    mov [dm_new_max], eax
+    cmp eax, 8
+    jge .dan_def16
+    mov [dm_new_size], eax
+    jmp .dan_defdone
+.dan_def16:
+    mov dword [dm_new_size], 16
+.dan_defdone:
     jmp .dm_loop
 .dm_left:
     mov byte [dm_side], 0
@@ -6458,6 +7059,7 @@ disk_mgr_app:
     je .dm_loop
     dec byte [dm_disk_sel]
     mov byte [dm_part_sel], 0
+    call dm_load_layout
     jmp .dm_loop
 .dm_up_part:
     cmp byte [dm_part_sel], 0
@@ -6473,21 +7075,24 @@ disk_mgr_app:
     jge .dm_loop
     inc byte [dm_disk_sel]
     mov byte [dm_part_sel], 0
+    call dm_load_layout
     jmp .dm_loop
 .dm_down_part:
-    cmp byte [dm_part_sel], 2
-    je .dm_loop
+    mov al, [dm_part_sel]
+    inc al
+    movzx ebx, byte [dm_part_count]
+    cmp al, bl
+    jg .dm_loop
     inc byte [dm_part_sel]
     jmp .dm_loop
 .dm_enter:
     cmp byte [dm_side], 0
     je .dm_loop
-    cmp byte [dm_part_sel], 2
-    jne .dm_loop
     mov byte [dm_show_act], 1
     mov byte [dm_act_sel], 0
     jmp .dm_loop
 .dm_exit:
+    mov byte [current_drive], 0xFF
     call clear_screen
     popa
     ret
@@ -6498,14 +7103,9 @@ dm_count_disks:
 .dcd_loop:
     cmp ebx, 4
     jge .dcd_done
-    mov eax, ebx
-    shl eax, 4
-    cmp byte [drive_table + eax], 0
+    cmp byte [disk_present + ebx], 0
     je .dcd_next
-    mov al, [drive_table + eax + 1]
-    cmp al, 'A'
-    je .dcd_next
-    mov ecx, [dm_disk_count]
+    movzx ecx, byte [dm_disk_count]
     mov [dm_disk_list + ecx], bl
     inc byte [dm_disk_count]
 .dcd_next:
@@ -6514,8 +7114,257 @@ dm_count_disks:
 .dcd_done:
     popa
     ret
+dm_load_layout:
+    pusha
+    movzx eax, byte [dm_disk_sel]
+    mov al, [dm_disk_list + eax]
+    mov [selected_disk], al
+    call get_disk_size
+    call read_mbr
+    mov byte [dm_part_count], 0
+    xor ebx, ebx
+.dll_loop:
+    cmp ebx, 4
+    jge .dll_done
+    movzx ecx, byte [dm_part_count]
+    cmp cl, 3
+    jge .dll_done
+    mov eax, ebx
+    shl eax, 4
+    cmp byte [partition_table + eax], 0
+    je .dll_next
+    mov [dm_part_slots + ecx], bl
+    inc byte [dm_part_count]
+.dll_next:
+    inc ebx
+    jmp .dll_loop
+.dll_done:
+    movzx eax, byte [dm_part_sel]
+    movzx ebx, byte [dm_part_count]
+    cmp al, bl
+    jle .dll_ok
+    mov byte [dm_part_sel], 0
+.dll_ok:
+    popa
+    ret
+dm_delete_part:
+    pusha
+    movzx eax, byte [dm_part_sel]
+    mov al, [dm_part_slots + eax]
+    mov dl, al
+    movzx ebx, al
+    shl ebx, 4
+    mov edi, partition_table
+    add edi, ebx
+    xor eax, eax
+    mov ecx, 4
+.ddp_clear:
+    mov dword [edi], 0
+    add edi, 4
+    dec ecx
+    jnz .ddp_clear
+    call write_mbr_from_table
+    mov ecx, 1
+.ddp_find:
+    cmp ecx, MAX_DRIVES
+    jge .ddp_unmounted
+    mov eax, ecx
+    shl eax, 4
+    cmp byte [drive_table + eax], 0
+    je .ddp_next
+    mov al, [drive_table + eax + 2]
+    cmp al, [selected_disk]
+    jne .ddp_next
+    mov al, [drive_table + eax + 3]
+    cmp al, dl
+    jne .ddp_next
+    mov edi, drive_table
+    add edi, eax
+    xor eax, eax
+    mov ecx, 4
+.ddp_clear2:
+    mov dword [edi], 0
+    add edi, 4
+    dec ecx
+    jnz .ddp_clear2
+    jmp .ddp_unmounted
+.ddp_next:
+    inc ecx
+    jmp .ddp_find
+.ddp_unmounted:
+    mov byte [current_drive], 0xFF
+    call dm_load_layout
+    popa
+    ret
+dm_format_part:
+    pusha
+    movzx eax, byte [dm_part_sel]
+    mov al, [dm_part_slots + eax]
+    mov [selected_partition], al
+    movzx ebx, al
+    shl ebx, 4
+    mov eax, [partition_table + ebx + 8]
+    mov [selected_partition_start], eax
+    mov eax, [partition_table + ebx + 12]
+    mov [selected_partition_size], eax
+    cmp byte [dm_fs_sel], 0
+    je .dfp_fat12
+    call format_fat32
+    mov byte [mbr_part_type], 0x0B
+    jmp .dfp_done
+.dfp_fat12:
+    call format_fat12
+    mov byte [mbr_part_type], 0x01
+.dfp_done:
+    movzx eax, byte [selected_partition]
+    shl eax, 4
+    mov bl, [mbr_part_type]
+    mov [partition_table + eax + 4], bl
+    call write_mbr_from_table
+    mov ecx, 1
+.dfp_find:
+    cmp ecx, MAX_DRIVES
+    jge .dfp_newletter
+    mov eax, ecx
+    shl eax, 4
+    cmp byte [drive_table + eax], 0
+    je .dfp_next
+    mov al, [drive_table + eax + 2]
+    cmp al, [selected_disk]
+    jne .dfp_next
+    mov al, [drive_table + eax + 3]
+    cmp al, [selected_partition]
+    je .dfp_mounted
+.dfp_next:
+    inc ecx
+    jmp .dfp_find
+.dfp_mounted:
+    mov ebx, ecx
+    shl ebx, 4
+    mov eax, [selected_partition_start]
+    mov [drive_table + ebx + 4], eax
+    jmp .dfp_mountdone
+.dfp_newletter:
+    call assign_drive_letter
+.dfp_mountdone:
+    mov byte [current_drive], 0xFF
+    call dm_load_layout
+    popa
+    ret
+dm_create_part:
+    pusha
+    mov eax, [dm_new_size]
+    mov ecx, 2048
+    mul ecx
+    mov ebx, eax
+    call write_mbr_single
+    call dm_load_layout
+    mov eax, [mbr_new_start]
+    mov ecx, 0
+.dcp_find_new:
+    cmp cl, [dm_part_count]
+    jge .dcp_format_setup
+    movzx edx, cl
+    mov al, [dm_part_slots + edx]
+    movzx eax, al
+    shl eax, 4
+    mov edx, [partition_table + eax + 8]
+    cmp edx, [mbr_new_start]
+    je .dcp_found_new
+    inc ecx
+    jmp .dcp_find_new
+.dcp_found_new:
+    mov [dm_part_sel], cl
+.dcp_format_setup:
+    mov byte [dm_confirm], 2
+    mov byte [dm_conf_sel], 0
+    mov byte [dm_fs_sel], 1
+    mov byte [dm_fmt_area], 0
+    popa
+    ret
+dm_act_count:
+    pusha
+    movzx eax, byte [dm_part_sel]
+    movzx ebx, byte [dm_part_count]
+    cmp al, bl
+    je .dac_free
+    mov byte [dm_act_count_v], 3
+    jmp .dac_done
+.dac_free:
+    mov byte [dm_act_count_v], 2
+.dac_done:
+    popa
+    mov al, [dm_act_count_v]
+    ret
+dm_get_drive_letter:
+    push ecx
+    push ebx
+    movzx ebx, al
+    mov ecx, 1
+.dgl_loop:
+    cmp ecx, MAX_DRIVES
+    jge .dgl_none
+    mov eax, ecx
+    shl eax, 4
+    cmp byte [drive_table + eax], 0
+    je .dgl_next
+    mov al, [drive_table + eax + 2]
+    cmp al, [selected_disk]
+    jne .dgl_next
+    mov al, [drive_table + eax + 3]
+    cmp al, bl
+    je .dgl_found
+.dgl_next:
+    inc ecx
+    jmp .dgl_loop
+.dgl_none:
+    xor eax, eax
+    jmp .dgl_done
+.dgl_found:
+    mov eax, ecx
+    shl eax, 4
+    mov al, [drive_table + eax + 1]
+.dgl_done:
+    pop ebx
+    pop ecx
+    ret
+dm_puts:
+    push eax
+    push esi
+.dmp_loop:
+    lodsb
+    cmp al, 0
+    je .dmp_done
+    mov [edi], al
+    mov [edi+1], ah
+    add edi, 2
+    jmp .dmp_loop
+.dmp_done:
+    pop esi
+    pop eax
+    ret
+dm_puts_num:
+    push eax
+    push esi
+    push edi
+    mov edi, dm_tmp_str
+    call int_to_string_fm
+    pop edi
+    mov esi, dm_tmp_str
+    mov ah, [dm_puts_attr]
+    call dm_puts
+    pop esi
+    pop eax
+    ret
+dm_puts_attr        db 0x1F
 dm_draw_final:
     pusha
+    mov al, [selected_disk]
+    mov [dm_saved_disk], al
+    mov al, [selected_partition]
+    mov [dm_saved_part], al
+    mov eax, [selected_partition_start]
+    mov [dm_saved_start], eax
     mov edi, 0xB8000
     mov ecx, 2000
     mov ax, 0x1F20
@@ -6529,7 +7378,7 @@ dm_draw_final:
     mov ah, 0x1F
     call tui_put_str
     mov edi, 0xB8000 + 3*160 + 22*2
-    mov esi, dm_str_vol
+    mov esi, dm_str_layout
     mov ah, 0x1F
     call tui_put_str
     mov ecx, 20
@@ -6544,6 +7393,12 @@ dm_draw_final:
     mov byte [edi], 0xB3
     mov byte [edi+1], 0x1F
     loop .ddf_vline
+    cmp byte [dm_show_new], 1
+    je .ddf_dialog_only
+    cmp byte [dm_show_act], 1
+    je .ddf_dialog_only
+    cmp byte [dm_confirm], 0
+    jne .ddf_dialog_only
     xor ebx, ebx
 .ddf_diskloop:
     mov [dm_loop_idx], ebx
@@ -6560,12 +7415,12 @@ dm_draw_final:
     jne .ddf_disknf
     cmp bl, [dm_disk_sel]
     jne .ddf_disknf
-    mov ecx, 16
+    mov ecx, 17
     mov ax, 0x3F20
     rep stosw
     jmp .ddf_diskdraw
 .ddf_disknf:
-    mov ecx, 16
+    mov ecx, 17
     mov ax, 0x1F20
     rep stosw
 .ddf_diskdraw:
@@ -6576,26 +7431,18 @@ dm_draw_final:
     mul ecx
     add edi, eax
     add edi, 2*2
-    ; Get disk index from drive table
     movzx ecx, bl
-    mov bl, [dm_disk_list + ecx]
-    ; Display disk channel info: [ PriMst/PriSlv/SecMst/SecSlv ]
-    mov eax, ebx
-    shl eax, 4
-    mov al, [drive_table + eax + 2]  ; Get disk number
-    push ebx
-    ; Get channel name
+    mov al, [dm_disk_list + ecx]
+    mov [dm_tmp_disk], al
     mov esi, disk_names
     movzx eax, al
     mov ebx, 7
     mul ebx
     add esi, eax
     mov ah, 0x1F
-    ; Write opening bracket
     mov byte [edi], '['
     mov byte [edi+1], 0x1F
     add edi, 2
-    ; Write channel name
 .ddf_chname:
     lodsb
     cmp al, 0
@@ -6605,36 +7452,52 @@ dm_draw_final:
     add edi, 2
     jmp .ddf_chname
 .ddf_chdone:
-    ; Write closing bracket and size
     mov byte [edi], ']'
     mov byte [edi+1], 0x1F
     add edi, 2
     mov byte [edi], ' '
     mov byte [edi+1], 0x1F
     add edi, 2
-    ; Write size in MB
-    pop ebx
-    mov eax, ebx
-    shl eax, 4
-    mov al, [drive_table + eax + 2]
+    mov al, [dm_tmp_disk]
     mov [selected_disk], al
     call get_disk_size
     mov eax, [disk_size_sectors]
-    mov ebx, 2048
+    mov ecx, 2048
     xor edx, edx
-    div ebx
-    call print_dec
-    mov esi, dm_str_mb
+    div ecx
+    mov edi, dm_tmp_str
+    call int_to_string_fm
+    mov al, [dm_saved_disk]
+    mov [selected_disk], al
+    mov edi, 0xB8000
+    mov eax, [dm_loop_idx]
+    add eax, 5
+    mov ecx, 160
+    mul ecx
+    add edi, eax
+    add edi, 11*2
+    mov esi, dm_tmp_str
     mov ah, 0x1F
-    call tui_put_str
+    call dm_puts
+    mov esi, dm_str_mb
+    call dm_puts
     mov ebx, [dm_loop_idx]
     inc ebx
     jmp .ddf_diskloop
 .ddf_diskdone:
-    mov edi, 0xB8000 + 5*160 + 22*2
-    mov esi, dm_str_layout
-    mov ah, 0x1F
-    call tui_put_str
+    mov al, [dm_saved_disk]
+    mov [selected_disk], al
+    mov al, [dm_saved_part]
+    mov [selected_partition], al
+    mov eax, [dm_saved_start]
+    mov [selected_partition_start], eax
+    call get_disk_size
+    cmp byte [dm_show_new], 1
+    je .ddf_skipbar
+    cmp byte [dm_show_act], 1
+    je .ddf_skipbar
+    cmp byte [dm_confirm], 0
+    jne .ddf_skipbar
     mov edi, 0xB8000 + 7*160 + 22*2
     mov byte [edi], 0xDA
     mov byte [edi+1], 0x1F
@@ -6646,29 +7509,71 @@ dm_draw_final:
     loop .ddf_top
     mov byte [edi+2], 0xBF
     mov byte [edi+3], 0x1F
+    mov dword [dm_col], 0
+.ddf_bar:
+    cmp dword [dm_col], 52
+    jge .ddf_bardone
+    mov eax, [disk_size_sectors]
+    mov ecx, [dm_col]
+    mul ecx
+    mov ecx, 52
+    xor edx, edx
+    div ecx
+    mov [dm_col_lba], eax
+    mov dword [dm_found], -1
+    xor ebx, ebx
+.ddf_pscan:
+    movzx ecx, byte [dm_part_count]
+    cmp bl, cl
+    jge .ddf_pscandone
+    movzx ecx, bl
+    mov al, [dm_part_slots + ecx]
+    movzx eax, al
+    shl eax, 4
+    mov edx, [partition_table + eax + 8]
+    mov ecx, [partition_table + eax + 12]
+    add ecx, edx
+    cmp [dm_col_lba], edx
+    jb .ddf_psnext
+    cmp [dm_col_lba], ecx
+    jae .ddf_psnext
+    mov [dm_found], ebx
+    jmp .ddf_pscandone
+.ddf_psnext:
+    inc ebx
+    jmp .ddf_pscan
+.ddf_pscandone:
     mov edi, 0xB8000 + 8*160 + 22*2
     mov byte [edi], 0xB3
     mov byte [edi+1], 0x1F
-    mov ecx, 13
-.ddf_p1:
-    mov byte [edi+2], 0xDB
-    mov byte [edi+3], 0x2F
-    add edi, 2
-    loop .ddf_p1
-    mov ecx, 13
-.ddf_p2:
-    mov byte [edi+2], 0xDB
-    mov byte [edi+3], 0x4F
-    add edi, 2
-    loop .ddf_p2
-    mov ecx, 26
-.ddf_free:
-    mov byte [edi+2], 0xB0
-    mov byte [edi+3], 0x8F
-    add edi, 2
-    loop .ddf_free
-    mov byte [edi+2], 0xB3
-    mov byte [edi+3], 0x1F
+    mov edi, 0xB8000 + 8*160 + 23*2
+    mov eax, [dm_col]
+    add eax, eax
+    add edi, eax
+    cmp dword [dm_found], -1
+    je .ddf_freecol
+    mov byte [edi], 0xDB
+    movzx eax, byte [dm_found]
+    test eax, eax
+    jne .ddf_colattr2
+    mov byte [edi+1], 0x2F
+    jmp .ddf_colattr
+.ddf_colattr2:
+    mov byte [edi+1], 0x4F
+.ddf_colattr:
+    jmp .ddf_colnext
+.ddf_freecol:
+    mov byte [edi], 0xB0
+    mov byte [edi+1], 0x70
+.ddf_colnext:
+    inc dword [dm_col]
+    jmp .ddf_bar
+.ddf_bardone:
+.ddf_skipbar:
+    mov edi, 0xB8000 + 8*160 + 22*2
+    add edi, 53*2
+    mov byte [edi], 0xB3
+    mov byte [edi+1], 0x1F
     mov edi, 0xB8000 + 9*160 + 22*2
     mov byte [edi], 0xC0
     mov byte [edi+1], 0x1F
@@ -6680,65 +7585,226 @@ dm_draw_final:
     loop .ddf_bot
     mov byte [edi+2], 0xD9
     mov byte [edi+3], 0x1F
-    mov edi, 0xB8000 + 11*160 + 22*2
-    cmp byte [dm_part_sel], 0
-    jne .ddf_p1nf
-    mov ah, 0x3F
-    jmp .ddf_p1d
-.ddf_p1nf:
-    mov ah, 0x1F
-.ddf_p1d:
-    push ax
-    mov esi, dm_str_p1
-    call tui_put_str
-    mov byte [edi], ' '
-    pop ax
-    mov byte [edi+1], ah
-    add edi, 2
-    movzx eax, byte [dm_part_sel]
-    shl eax, 4
-    mov eax, [partition_table + eax + 12]  ; Get partition size in sectors
-    mov ebx, 2048
-    xor edx, edx
-    div ebx
-    call print_dec
-    mov esi, dm_str_mb
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 12*160 + 22*2
-    cmp byte [dm_part_sel], 1
-    jne .ddf_p2nf
-    mov esi, dm_str_p2_f
-    mov ah, 0x3F
-    jmp .ddf_p2d
-.ddf_p2nf:
-    mov esi, dm_str_p2
-    mov ah, 0x1F
-.ddf_p2d:
-    call tui_put_str
-    mov edi, 0xB8000 + 13*160 + 22*2
-    cmp byte [dm_part_sel], 2
-    jne .ddf_freenf
-    mov esi, dm_str_free_f
-    mov ah, 0x3F
-    jmp .ddf_freed
-.ddf_freenf:
-    mov esi, dm_str_free
-    mov ah, 0x1F
-.ddf_freed:
-    call tui_put_str
+    cmp byte [dm_show_new], 1
+    je .ddf_skiplist
     cmp byte [dm_show_act], 1
-    jne .ddf_noact
-    mov edi, 0xB8000 + 8*160 + 24*2
-    mov ecx, 32
+    je .ddf_skiplist
+    cmp byte [dm_confirm], 0
+    jne .ddf_skiplist
+    xor ebx, ebx
+.ddf_plist:
+    movzx ecx, byte [dm_part_count]
+    cmp bl, cl
+    jge .ddf_pfree
+    mov edi, 0xB8000
+    mov eax, ebx
+    add eax, 11
+    mov ecx, 160
+    mul ecx
+    add edi, eax
+    add edi, 22*2
+    cmp byte [dm_side], 1
+    jne .ddf_pnf
+    cmp bl, [dm_part_sel]
+    jne .ddf_pnf
+    mov ecx, 40
     mov ax, 0x7020
     rep stosw
-    mov edi, 0xB8000 + 8*160 + 26*2
+    jmp .ddf_pdraw
+.ddf_pnf:
+    mov ecx, 40
+    mov ax, 0x1F20
+    rep stosw
+.ddf_pdraw:
+    mov edi, 0xB8000
+    mov eax, ebx
+    add eax, 11
+    mov ecx, 160
+    mul ecx
+    add edi, eax
+    add edi, 22*2
+    cmp byte [dm_side], 1
+    jne .ddf_pnofocus
+    cmp bl, [dm_part_sel]
+    jne .ddf_pnofocus
+    mov byte [edi], '>'
+    mov byte [edi+1], 0x7F
+    add edi, 2
+    mov byte [edi], '['
+    mov byte [edi+1], 0x7F
+    add edi, 2
+    mov ah, 0x7F
+    jmp .ddf_pdraw_content
+.ddf_pnofocus:
+    mov byte [edi], '['
+    mov byte [edi+1], 0x1F
+    add edi, 2
+    mov ah, 0x1F
+.ddf_pdraw_content:
+    mov esi, dm_str_part_lbl
+    call dm_puts
+    mov eax, ebx
+    inc eax
+    mov byte [dm_puts_attr], ah
+    call dm_puts_num
+    mov ah, [dm_puts_attr]
+    mov esi, dm_str_colon
+    call dm_puts
+    movzx ecx, bl
+    mov al, [dm_part_slots + ecx]
+    movzx eax, al
+    shl eax, 4
+    mov al, [partition_table + eax + 4]
+    cmp al, 0x0B
+    je .ddf_t32
+    cmp al, 0x0C
+    je .ddf_t32
+    cmp al, 0x01
+    je .ddf_t12
+    cmp al, 0x04
+    je .ddf_t12
+    cmp al, 0x06
+    je .ddf_t12
+    cmp al, 0x0E
+    je .ddf_t12
+    mov esi, dm_str_raw
+    jmp .ddf_tdraw
+.ddf_t12:
+    mov esi, dm_str_fat12
+    jmp .ddf_tdraw
+.ddf_t32:
+    mov esi, dm_str_fat32
+.ddf_tdraw:
+    mov ah, [dm_puts_attr]
+    call dm_puts
+    mov esi, dm_str_space
+    call dm_puts
+    movzx ecx, bl
+    mov al, [dm_part_slots + ecx]
+    movzx eax, al
+    shl eax, 4
+    mov eax, [partition_table + eax + 12]
+    mov ecx, 2048
+    xor edx, edx
+    div ecx
+    push eax
+    mov al, [dm_puts_attr]
+    mov byte [dm_puts_attr], al
+    pop eax
+    call dm_puts_num
+    mov ah, [dm_puts_attr]
+    mov esi, dm_str_mb
+    call dm_puts
+    mov esi, dm_str_space
+    call dm_puts
+    mov byte [edi], ']'
+    mov byte [edi+1], ah
+    add edi, 2
+    cmp byte [dm_side], 1
+    jne .ddf_pdone
+    cmp bl, [dm_part_sel]
+    jne .ddf_pdone
+    mov byte [edi], '<'
+    mov byte [edi+1], 0x7F
+.ddf_pdone:
+    inc ebx
+    jmp .ddf_plist
+.ddf_skiplist:
+.ddf_pfree:
+    mov edi, 0xB8000
+    mov eax, ebx
+    add eax, 11
+    mov ecx, 160
+    mul ecx
+    add edi, eax
+    add edi, 22*2
+    cmp byte [dm_side], 1
+    jne .ddf_freenf
+    cmp bl, [dm_part_sel]
+    jne .ddf_freenf
+    mov ecx, 40
+    mov ax, 0x3F20
+    rep stosw
+    jmp .ddf_freedraw
+.ddf_freenf:
+    mov ecx, 40
+    mov ax, 0x1F20
+    rep stosw
+.ddf_freedraw:
+    mov edi, 0xB8000
+    mov eax, ebx
+    add eax, 11
+    mov ecx, 160
+    mul ecx
+    add edi, eax
+    add edi, 22*2
+    mov esi, dm_str_free
+    mov ah, 0x1F
+    call dm_puts
+.ddf_dialog_only:
+    cmp byte [dm_show_act], 1
+    jne .ddf_noact
+    mov ecx, 9
+.dda_bgloop:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 6
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 20*2
+    push ecx
+    mov ecx, 38
+    mov ax, 0x7020
+    rep stosw
+    pop ecx
+    loop .dda_bgloop
+    mov edi, 0xB8000 + 7*160 + 20*2
+    mov byte [edi], 0xDA
+    mov byte [edi+1], 0x70
+    mov ecx, 36
+.dda_top:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x70
+    add edi, 2
+    loop .dda_top
+    mov byte [edi+2], 0xBF
+    mov byte [edi+3], 0x70
+    mov ecx, 7
+.dda_sides:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 7
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 20*2
+    mov byte [edi], 0xB3
+    mov byte [edi+1], 0x70
+    mov byte [edi+37*2], 0xB3
+    mov byte [edi+37*2+1], 0x70
+    loop .dda_sides
+    mov edi, 0xB8000 + 15*160 + 20*2
+    mov byte [edi], 0xC0
+    mov byte [edi+1], 0x70
+    mov ecx, 36
+.dda_bot:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x70
+    add edi, 2
+    loop .dda_bot
+    mov byte [edi+2], 0xD9
+    mov byte [edi+3], 0x70
+    mov edi, 0xB8000 + 8*160 + 28*2
     mov esi, dm_str_act_title
     mov ah, 0x70
     call tui_put_str
+    movzx eax, byte [dm_part_sel]
+    movzx ebx, byte [dm_part_count]
+    cmp al, bl
+    je .ddf_actfree
     mov edi, 0xB8000 + 10*160 + 28*2
-    mov esi, dm_str_act_new
+    mov esi, dm_str_act_del
     cmp byte [dm_act_sel], 0
     jne .dda_nf0
     mov ah, 0x3F
@@ -6767,7 +7833,398 @@ dm_draw_final:
     mov ah, 0x70
 .dda_d2:
     call tui_put_str
+    jmp .ddf_actdone
+.ddf_actfree:
+    mov edi, 0xB8000 + 10*160 + 28*2
+    mov esi, dm_str_act_new
+    cmp byte [dm_act_sel], 0
+    jne .dda_nf3
+    mov ah, 0x3F
+    jmp .dda_d3
+.dda_nf3:
+    mov ah, 0x70
+.dda_d3:
+    call tui_put_str
+    mov edi, 0xB8000 + 12*160 + 28*2
+    mov esi, dm_str_act_back
+    cmp byte [dm_act_sel], 1
+    jne .dda_nf4
+    mov ah, 0x3F
+    jmp .dda_d4
+.dda_nf4:
+    mov ah, 0x70
+.dda_d4:
+    call tui_put_str
+.ddf_actdone:
 .ddf_noact:
+    cmp byte [dm_show_new], 1
+    jne .ddf_nonew
+    mov ecx, 8
+.dnn_bgloop:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 6
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 18*2
+    push ecx
+    mov ecx, 44
+    mov ax, 0x7020
+    rep stosw
+    pop ecx
+    loop .dnn_bgloop
+    mov edi, 0xB8000 + 7*160 + 18*2
+    mov byte [edi], 0xDA
+    mov byte [edi+1], 0x70
+    mov ecx, 42
+.dnn_top:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x70
+    add edi, 2
+    loop .dnn_top
+    mov byte [edi+2], 0xBF
+    mov byte [edi+3], 0x70
+    mov ecx, 6
+.dnn_sides:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 7
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 18*2
+    mov byte [edi], 0xB3
+    mov byte [edi+1], 0x70
+    mov byte [edi+43*2], 0xB3
+    mov byte [edi+43*2+1], 0x70
+    loop .dnn_sides
+    mov edi, 0xB8000 + 14*160 + 18*2
+    mov byte [edi], 0xC0
+    mov byte [edi+1], 0x70
+    mov ecx, 42
+.dnn_bot:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x70
+    add edi, 2
+    loop .dnn_bot
+    mov byte [edi+2], 0xD9
+    mov byte [edi+3], 0x70
+    mov edi, 0xB8000 + 8*160 + 26*2
+    mov esi, dm_str_new_title
+    mov ah, 0x70
+    call tui_put_str
+    mov edi, 0xB8000 + 10*160 + 20*2
+    mov esi, dm_str_new_size
+    mov ah, 0x70
+    call dm_puts
+    mov eax, [dm_new_size]
+    mov byte [dm_puts_attr], 0x70
+    call dm_puts_num
+    mov esi, dm_str_mb
+    mov ah, 0x70
+    call dm_puts
+    mov edi, 0xB8000 + 11*160 + 20*2
+    mov esi, dm_str_new_hint
+    mov ah, 0x70
+    call tui_put_str
+    mov edi, 0xB8000 + 13*160 + 22*2
+    mov esi, dm_str_create
+    cmp byte [dm_conf_sel], 0
+    jne .dnn_nf
+    mov ah, 0x3F
+    jmp .dnn_d
+.dnn_nf:
+    mov ah, 0x70
+.dnn_d:
+    call tui_put_str
+    mov edi, 0xB8000 + 13*160 + 36*2
+    mov esi, dm_str_cancel
+    cmp byte [dm_conf_sel], 1
+    jne .dnn_nf2
+    mov ah, 0x3F
+    jmp .dnn_d2
+.dnn_nf2:
+    mov ah, 0x70
+.dnn_d2:
+    call tui_put_str
+.ddf_nonew:
+    cmp byte [dm_confirm], 1
+    jne .ddf_noconfdel
+    mov ecx, 7
+.dcd_bgloop:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 6
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 14*2
+    push ecx
+    mov ecx, 52
+    mov ax, 0x4020
+    rep stosw
+    pop ecx
+    loop .dcd_bgloop
+    mov edi, 0xB8000 + 7*160 + 14*2
+    mov byte [edi], 0xDA
+    mov byte [edi+1], 0x40
+    mov ecx, 50
+.dcd_top:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x40
+    add edi, 2
+    loop .dcd_top
+    mov byte [edi+2], 0xBF
+    mov byte [edi+3], 0x40
+    mov ecx, 5
+.dcd_sides:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 7
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 14*2
+    mov byte [edi], 0xB3
+    mov byte [edi+1], 0x40
+    mov byte [edi+51*2], 0xB3
+    mov byte [edi+51*2+1], 0x40
+    loop .dcd_sides
+    mov edi, 0xB8000 + 13*160 + 14*2
+    mov byte [edi], 0xC0
+    mov byte [edi+1], 0x40
+    mov ecx, 50
+.dcd_bot:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x40
+    add edi, 2
+    loop .dcd_bot
+    mov byte [edi+2], 0xD9
+    mov byte [edi+3], 0x40
+    mov edi, 0xB8000 + 8*160 + 24*2
+    mov esi, dm_str_del_title
+    mov ah, 0x40
+    call tui_put_str
+    mov edi, 0xB8000 + 10*160 + 17*2
+    mov esi, dm_str_del_msg
+    mov ah, 0x40
+    call tui_put_str
+    mov edi, 0xB8000 + 12*160 + 24*2
+    mov esi, dm_str_yes
+    cmp byte [dm_conf_sel], 0
+    jne .dcd_nf
+    mov ah, 0x4F
+    jmp .dcd_d
+.dcd_nf:
+    mov ah, 0x40
+.dcd_d:
+    call tui_put_str
+    mov edi, 0xB8000 + 12*160 + 34*2
+    mov esi, dm_str_no
+    cmp byte [dm_conf_sel], 1
+    jne .dcd_nf2
+    mov ah, 0x4F
+    jmp .dcd_d2
+.dcd_nf2:
+    mov ah, 0x40
+.dcd_d2:
+    call tui_put_str
+.ddf_noconfdel:
+    cmp byte [dm_confirm], 2
+    jne .ddf_nofs
+    mov ecx, 7
+.dfs_bgloop:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 6
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 14*2
+    push ecx
+    mov ecx, 52
+    mov ax, 0x7020
+    rep stosw
+    pop ecx
+    loop .dfs_bgloop
+    mov edi, 0xB8000 + 7*160 + 14*2
+    mov byte [edi], 0xDA
+    mov byte [edi+1], 0x70
+    mov ecx, 50
+.dfs_top:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x70
+    add edi, 2
+    loop .dfs_top
+    mov byte [edi+2], 0xBF
+    mov byte [edi+3], 0x70
+    mov ecx, 5
+.dfs_sides:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 7
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 14*2
+    mov byte [edi], 0xB3
+    mov byte [edi+1], 0x70
+    mov byte [edi+51*2], 0xB3
+    mov byte [edi+51*2+1], 0x70
+    loop .dfs_sides
+    mov edi, 0xB8000 + 13*160 + 14*2
+    mov byte [edi], 0xC0
+    mov byte [edi+1], 0x70
+    mov ecx, 50
+.dfs_bot:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x70
+    add edi, 2
+    loop .dfs_bot
+    mov byte [edi+2], 0xD9
+    mov byte [edi+3], 0x70
+    mov edi, 0xB8000 + 8*160 + 24*2
+    mov esi, dm_str_fmt_title
+    mov ah, 0x70
+    call tui_put_str
+    mov edi, 0xB8000 + 10*160 + 20*2
+    mov esi, dm_str_fmt_fs
+    mov ah, 0x70
+    cmp byte [dm_fmt_area], 0
+    jne .dfs_labelf
+    mov ah, 0x3F
+.dfs_labelf:
+    call tui_put_str
+    mov edi, 0xB8000 + 10*160 + 34*2
+    mov esi, dm_str_fat12
+    cmp byte [dm_fs_sel], 0
+    jne .dfs_nf0
+    mov ah, 0x3F
+    jmp .dfs_d0
+.dfs_nf0:
+    mov ah, 0x70
+.dfs_d0:
+    call tui_put_str
+    mov edi, 0xB8000 + 10*160 + 44*2
+    mov esi, dm_str_fat32
+    cmp byte [dm_fs_sel], 1
+    jne .dfs_nf1
+    mov ah, 0x3F
+    jmp .dfs_d1
+.dfs_nf1:
+    mov ah, 0x70
+.dfs_d1:
+    call tui_put_str
+    mov edi, 0xB8000 + 12*160 + 22*2
+    mov esi, dm_str_confirm
+    cmp byte [dm_conf_sel], 0
+    jne .dfs_nf2
+    mov ah, 0x3F
+    cmp byte [dm_fmt_area], 1
+    je .dfs_d2
+    mov ah, 0x70
+    jmp .dfs_d2
+.dfs_nf2:
+    mov ah, 0x70
+.dfs_d2:
+    call tui_put_str
+    mov edi, 0xB8000 + 12*160 + 36*2
+    mov esi, dm_str_cancel
+    cmp byte [dm_conf_sel], 1
+    jne .dfs_nf3
+    mov ah, 0x3F
+    cmp byte [dm_fmt_area], 1
+    je .dfs_d3
+    mov ah, 0x70
+    jmp .dfs_d3
+.dfs_nf3:
+    mov ah, 0x70
+.dfs_d3:
+    call tui_put_str
+.ddf_nofs:
+    cmp byte [dm_confirm], 3
+    jne .ddf_nowarn
+    mov ecx, 5
+.dwn_bgloop:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 7
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 15*2
+    push ecx
+    mov ecx, 50
+    mov ax, 0xE020
+    rep stosw
+    pop ecx
+    loop .dwn_bgloop
+    mov edi, 0xB8000 + 7*160 + 14*2
+    mov byte [edi], 0xDA
+    mov byte [edi+1], 0xE0
+    mov ecx, 50
+.dwn_top:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0xE0
+    add edi, 2
+    loop .dwn_top
+    mov byte [edi+2], 0xBF
+    mov byte [edi+3], 0xE0
+    mov ecx, 5
+.dwn_sides:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 7
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 14*2
+    mov byte [edi], 0xB3
+    mov byte [edi+1], 0xE0
+    mov byte [edi+51*2], 0xB3
+    mov byte [edi+51*2+1], 0xE0
+    loop .dwn_sides
+    mov edi, 0xB8000 + 13*160 + 14*2
+    mov byte [edi], 0xC0
+    mov byte [edi+1], 0xE0
+    mov ecx, 50
+.dwn_bot:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0xE0
+    add edi, 2
+    loop .dwn_bot
+    mov byte [edi+2], 0xD9
+    mov byte [edi+3], 0xE0
+    mov edi, 0xB8000 + 8*160 + 30*2
+    mov esi, dm_str_warn_title
+    mov ah, 0xE0
+    call tui_put_str
+    mov edi, 0xB8000 + 10*160 + 18*2
+    mov esi, dm_str_warn_msg
+    mov ah, 0xE0
+    call tui_put_str
+    mov edi, 0xB8000 + 12*160 + 20*2
+    mov esi, dm_str_continue
+    cmp byte [dm_conf_sel], 0
+    jne .dwn_nf
+    mov ah, 0x1F
+    jmp .dwn_d
+.dwn_nf:
+    mov ah, 0xE0
+.dwn_d:
+    call tui_put_str
+    mov edi, 0xB8000 + 12*160 + 34*2
+    mov esi, dm_str_cancel
+    cmp byte [dm_conf_sel], 1
+    jne .dwn_nf2
+    mov ah, 0x1F
+    jmp .dwn_d2
+.dwn_nf2:
+    mov ah, 0xE0
+.dwn_d2:
+    call tui_put_str
+.ddf_nowarn:
     mov edi, 0xB8000 + 24*160
     mov ecx, 80
     mov ax, 0x7020
@@ -6779,24 +8236,48 @@ dm_draw_final:
     popa
     ret
 dm_disk_size       db 64
-
 dm_show_new        db 0
-dm_new_size        db 16
-dm_str_vol          db 'Volumes:',0
-dm_str_disk_lbl    db 'Disk',0
-dm_str_p1          db 'Partition 1',0
-dm_str_p1_f        db '> (C:) 16MB NTFS <',0
-dm_str_p2          db 'Partition 2',0
-dm_str_p2_f        db '> (D:) 16MB FAT32 <',0
-dm_str_free_f      db '> Unallocated 32MB <',0
-dm_str_mb          db 'MB',0
+dm_new_size        dd 16
+dm_new_max         dd 1024
+dm_confirm         db 0
+dm_conf_sel        db 0
+dm_fs_sel          db 1
+dm_fmt_area        db 0
+dm_act_count_v     db 0
+dm_saved_disk      db 0
+dm_saved_part      db 0
+dm_saved_start     dd 0
+dm_tmp_disk        db 0
+dm_tmp_letter      db 0
+dm_tmp_str2        times 8 db 0
+dm_col             dd 0
+dm_col_lba         dd 0
+dm_found           dd 0
+dm_part_slots      times 4 db 0
 dm_str_layout      db 'Disk Layout:',0
-
-dm_count_parts:
-    pusha
-    mov byte [dm_part_count], 2
-    popa
-    ret
+dm_str_mb          db 'MB',0
+dm_str_colon       db ': ',0
+dm_str_openp       db '(',0
+dm_str_closep      db ':) ',0
+dm_str_space       db ' ',0
+dm_str_fat12       db 'FAT12',0
+dm_str_fat32       db 'FAT32',0
+dm_str_raw         db 'RAW',0
+dm_str_del_title   db 'Delete Partition',0
+dm_str_del_msg     db 'Are you sure you want to delete this partition?',0
+dm_str_yes         db '[ YES ]',0
+dm_str_no          db '[ NO ]',0
+dm_str_fmt_title   db 'Format Partition',0
+dm_str_fmt_fs      db 'Filesystem:',0
+dm_str_confirm     db '[ Confirm ]',0
+dm_str_cancel      db '[ Cancel ]',0
+dm_str_warn_title  db 'Warning',0
+dm_str_warn_msg    db 'All data on this partition will be erased!',0
+dm_str_continue    db '[ Continue ]',0
+dm_str_new_title   db 'New Partition',0
+dm_str_new_size    db 'Size (MB): ',0
+dm_str_new_hint    db 'Up/Down:Size  L/R:Select  Enter:OK',0
+dm_str_create      db '[ Create ]',0
 dm_side            db 0
 dm_disk_sel        db 0
 dm_part_sel        db 0
@@ -6808,161 +8289,6 @@ dm_show_act        db 0
 dm_tmp_str         times 16 db 0
 dm_exit            db 0
 dm_loop_idx        dd 0
-
-dev_mgr_app:
-    pusha
-    call clear_screen
-    mov edi, 0xB8000
-    mov ecx, 2000
-    mov ax, 0xAF20
-    rep stosw
-    mov byte [dev_exit], 0
-    call dev_detect
-.dev_loop:
-    call dev_mgr_draw
-    call read_scancode
-    cmp al, 0x01
-    je .dev_exit
-    cmp al, 0x1C
-    je .dev_exit
-    jmp .dev_loop
-.dev_exit:
-    call clear_screen
-    popa
-    ret
-dev_detect:
-    pusha
-    mov byte [dev_count], 0
-    mov dword [dev_mem_base], 640
-    mov eax, 1024
-    mov [dev_mem_ext], eax
-    mov byte [dev_cpu_count], 1
-    mov byte [dev_disk_count], 0
-    xor ebx, ebx
-.dd_diskloop:
-    cmp ebx, 4
-    jge .dd_diskdone
-    mov eax, ebx
-    shl eax, 4
-    cmp byte [drive_table + eax], 0
-    je .dd_disknext
-    inc byte [dev_disk_count]
-.dd_disknext:
-    inc ebx
-    jmp .dd_diskloop
-.dd_diskdone:
-    popa
-    ret
-dev_mgr_draw:
-    pusha
-    mov edi, 0xB8000
-    mov ecx, 2000
-    mov ax, 0x1F20
-    rep stosw
-    mov edi, 0xB8000 + 1*160 + 24*2
-    mov esi, dev_str_title
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 3*160 + 4*2
-    mov esi, dev_str_cpu
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 3*160 + 40*2
-    mov esi, dev_str_present
-    mov ah, 0x2F
-    call tui_put_str
-    mov edi, 0xB8000 + 5*160 + 4*2
-    mov esi, dev_str_mem
-    mov ah, 0x1F
-    call tui_put_str
-    mov eax, [dev_mem_base]
-    mov edi, dm_tmp_str
-    call int_to_string_fm
-    mov edi, 0xB8000 + 5*160 + 30*2
-    mov esi, dm_tmp_str
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 5*160 + 36*2
-    mov esi, dev_str_kb
-    mov ah, 0x1F
-    call tui_put_str
-    mov eax, [dev_mem_ext]
-    mov edi, dm_tmp_str
-    call int_to_string_fm
-    mov edi, 0xB8000 + 5*160 + 44*2
-    mov esi, dm_tmp_str
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 5*160 + 52*2
-    mov esi, dev_str_kb
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 7*160 + 4*2
-    mov esi, dev_str_kbd
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 7*160 + 40*2
-    mov esi, dev_str_present
-    mov ah, 0x2F
-    call tui_put_str
-    mov edi, 0xB8000 + 9*160 + 4*2
-    mov esi, dev_str_vga
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 9*160 + 40*2
-    mov esi, dev_str_present
-    mov ah, 0x2F
-    call tui_put_str
-    mov edi, 0xB8000 + 11*160 + 4*2
-    mov esi, dev_str_fdc
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 11*160 + 40*2
-    mov esi, dev_str_present
-    mov ah, 0x2F
-    call tui_put_str
-    mov edi, 0xB8000 + 13*160 + 4*2
-    mov esi, dev_str_ata
-    mov ah, 0x1F
-    call tui_put_str
-    movzx eax, byte [dev_disk_count]
-    mov edi, dm_tmp_str
-    call int_to_string_fm
-    mov edi, 0xB8000 + 13*160 + 40*2
-    mov esi, dm_tmp_str
-    mov ah, 0x2F
-    call tui_put_str
-    mov edi, 0xB8000 + 13*160 + 44*2
-    mov esi, dev_str_drv
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 15*160 + 4*2
-    mov esi, dev_str_rtc
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 15*160 + 40*2
-    mov esi, dev_str_present
-    mov ah, 0x2F
-    call tui_put_str
-    mov edi, 0xB8000 + 17*160 + 4*2
-    mov esi, dev_str_pit
-    mov ah, 0x1F
-    call tui_put_str
-    mov edi, 0xB8000 + 17*160 + 40*2
-    mov esi, dev_str_present
-    mov ah, 0x2F
-    call tui_put_str
-    mov edi, 0xB8000 + 24*160
-    mov ecx, 80
-    mov ax, 0x7020
-    rep stosw
-    mov edi, 0xB8000 + 24*160 + 2
-    mov esi, dev_str_help
-    mov ah, 0x70
-    call tui_put_str
-    popa
-    ret
-
 settings_draw:
     pusha
     mov edi, 0xB8000
@@ -6994,7 +8320,7 @@ settings_draw:
 .sd_draw2:
     call tui_put_str
     mov edi, 0xB8000 + 1440 + 56
-    mov esi, settings_str_dev
+    mov esi, settings_str_back
     cmp byte [settings_focus], 2
     jne .sd_no3
     mov ah, 0x3F
@@ -7002,16 +8328,6 @@ settings_draw:
 .sd_no3:
     mov ah, 0x70
 .sd_draw3:
-    call tui_put_str
-    mov edi, 0xB8000 + 1760 + 56
-    mov esi, settings_str_back
-    cmp byte [settings_focus], 3
-    jne .sd_no4
-    mov ah, 0x3F
-    jmp .sd_draw4
-.sd_no4:
-    mov ah, 0x70
-.sd_draw4:
     call tui_put_str
     mov edi, 0xB8000 + 3680 + 40
     mov esi, settings_str_help
@@ -8080,6 +9396,8 @@ fm_scan_dir:
     mov al, [edi + 11]
     test al, 0x08
     jnz .scan_next
+    test al, 0x02
+    jnz .scan_next
     cmp byte [edi], '.'
     jne .not_dot
     cmp byte [edi + 1], '.'
@@ -8272,10 +9590,7 @@ fm_draw:
     mov esi, fm_entries
     add esi, edx
     mov eax, [esi + 28]
-    push edi
-    mov edi, fm_tmp_str
-    call int_to_string_fm
-    pop edi
+    call format_size_str
     push esi
     mov esi, fm_tmp_str
     call str_len
@@ -8587,8 +9902,7 @@ fm_parent_dir:
     mov [current_dir_sector], eax
     jmp .parent_trim
 .parent_root:
-    mov eax, [root_dir_start]
-    mov [current_dir_sector], eax
+    call set_root_dir
 .parent_trim:
     mov esi, current_path
     call str_len
@@ -8943,7 +10257,8 @@ fm_delete:
     add edi, eax
     movzx ebx, word [edi + 26]
 .free_loop:
-    cmp ebx, 0x0FF8
+    mov eax, ebx
+    call cluster_is_eof
     jae .free_done
     cmp ebx, 2
     jb .free_done
@@ -9061,6 +10376,7 @@ fm_viewer_draw:
     mov esi, fm_file_buf
     mov eax, [fm_view_scroll]
     mov ecx, eax
+    mov edx, 0
 .skip_lines:
     cmp ecx, 0
     je .skip_done
@@ -9069,13 +10385,20 @@ fm_viewer_draw:
     je .skip_done
     cmp al, 0x0A
     je .skip_line
+    inc edx
+    cmp edx, 78
+    jl .skip_lines
+    mov edx, 0
+    dec ecx
     jmp .skip_lines
 .skip_line:
+    mov edx, 0
     dec ecx
     jmp .skip_lines
 .skip_done:
     mov edi, 0xB8000 + 2*80*2
     mov ecx, 22
+    mov edx, 0
     mov ah, 0x1F
 .viewer_line:
     push ecx
@@ -9091,6 +10414,7 @@ fm_viewer_draw:
     mov [edi], al
     mov [edi+1], ah
     add edi, 2
+    inc edx
     loop .viewer_char
     jmp .viewer_nextline
 .viewer_newline:
@@ -9098,7 +10422,7 @@ fm_viewer_draw:
     sub eax, ecx
     shl eax, 1
     add edi, eax
-    jmp .viewer_nextline
+    mov edx, 0
 .viewer_nextline:
     mov eax, 80
     sub eax, 78
@@ -9291,9 +10615,7 @@ fm_select_disk:
     mov byte [current_path + 1], 47
     mov byte [current_path + 2], 0
     call restore_current_drive_state
-    mov dword [current_dir_cluster], 0
-    mov eax, [root_dir_start]
-    mov [current_dir_sector], eax
+    call set_root_dir
     mov dword [fm_selected], 0
     mov dword [fm_scroll], 0
     mov byte [fm_disk_exit], 1
@@ -9494,7 +10816,7 @@ write_file_from_buf:
     mov ebx, eax
     push ebx
     mov eax, ebx
-    mov ebx, 0x0FFF
+    call set_eof_marker
     call set_next_cluster
     pop ebx
     call write_fat
@@ -9569,11 +10891,35 @@ int_to_string_fm:
     mov byte [edi], 0
     popa
     ret
-
-;=============================================================================
-; Notepad Application - Text editor with undo/redo and file I/O
-;=============================================================================
-
+format_size_str:
+    pusha
+    mov byte [fmt_size_flag], 0
+    cmp eax, 1024
+    jb .fs_num
+    mov byte [fmt_size_flag], 1
+    mov ecx, 1024
+    xor edx, edx
+    div ecx
+.fs_num:
+    mov edi, fm_tmp_str
+    call int_to_string_fm
+    mov edi, fm_tmp_str
+    call str_len
+    mov edi, fm_tmp_str
+    add edi, eax
+    cmp byte [fmt_size_flag], 1
+    jne .fs_b
+    mov al, 'K'
+    mov [edi], al
+    inc edi
+.fs_b:
+    mov al, 'B'
+    mov [edi], al
+    inc edi
+    mov byte [edi], 0
+    popa
+    ret
+fmt_size_flag db 0
 notepad_app_body:
     pusha
     call clear_screen
@@ -9788,6 +11134,33 @@ notepad_handle:
     call notepad_cur_down
     jmp .nh_done
 .nh_cs:
+    cmp byte [notepad_current_file], 0
+    je .nh_cs_dialog
+    mov esi, notepad_buf
+    call str_len
+    mov [notepad_len], eax
+    mov edi, notepad_dlg_filename
+    mov al, [current_path]
+    mov [edi], al
+    inc edi
+    mov byte [edi], ':'
+    inc edi
+    mov byte [edi], '/'
+    inc edi
+    mov esi, notepad_current_file
+.nh_cs_copy:
+    lodsb
+    cmp al, 0
+    je .nh_cs_copydone
+    mov [edi], al
+    inc edi
+    jmp .nh_cs_copy
+.nh_cs_copydone:
+    mov byte [edi], 0
+    mov edi, notepad_dlg_filename
+    call notepad_write_file
+    jmp .nh_done
+.nh_cs_dialog:
     call notepad_save_dialog
     jmp .nh_done
 .nh_co:
@@ -10052,58 +11425,695 @@ notepad_redo:
 
 notepad_save_dialog:
     pusha
-    mov byte [notepad_dlg_mode], 0
-    call nfd_main
-    cmp byte [nfd_result], 0
-    je .nsd_cancel
-    mov esi, notepad_buf
-    call str_len
-    mov [notepad_len], eax
-    ; Copy the chosen filename/path with an explicit loop (str_copy relies on
-    ; an indeterminate ecx here, so a manual copy is used instead)
-    mov esi, nfd_filename
-    mov edi, notepad_dlg_filename
-.nsd_copy:
-    mov al, [esi]
-    mov [edi], al
-    cmp al, 0
-    je .nsd_copy_done
-    inc esi
-    inc edi
-    jmp .nsd_copy
-.nsd_copy_done:
-    mov edi, notepad_dlg_filename
-    call notepad_write_file
-.nsd_cancel:
-    popa
-    ret
+    mov byte [nsd_mode], 0
+    jmp nsd_dialog_main
 notepad_open_dialog:
     pusha
-    mov byte [notepad_dlg_mode], 1
-    call nfd_main
-    cmp byte [nfd_result], 0
-    je .nod_cancel
-    mov esi, nfd_filename
-    mov edi, notepad_dlg_filename
-.nod_copy:
-    mov al, [esi]
-    mov [edi], al
+    mov byte [nsd_mode], 1
+nsd_dialog_main:
+    mov byte [nsd_focus], 0
+    mov byte [nsd_level], 0
+    mov dword [nsd_sel], 0
+    mov dword [nsd_count], 0
+    mov dword [nsd_scroll], 0
+    mov byte [nsd_drive], 0
+    mov byte [nsd_btn_sel], 0
+    mov dword [nsd_path_depth], 0
+    mov byte [nsd_filename], 0
+    call nsd_build_drives
+.nsd_loop:
+    call nsd_draw
+    call read_scancode
+    cmp al, 0x2A
+    je .nsd_shift_down
+    cmp al, 0x36
+    je .nsd_shift_down
+    cmp al, 0xAA
+    je .nsd_shift_up
+    cmp al, 0xB6
+    je .nsd_shift_up
+    test al, 0x80
+    jnz .nsd_loop
+    cmp byte [nsd_focus], 0
+    je .nsd_browser_keys
+    cmp byte [nsd_focus], 1
+    je .nsd_name_keys
+    jmp .nsd_button_keys
+.nsd_shift_down:
+    mov byte [shift_pressed], 1
+    jmp .nsd_loop
+.nsd_shift_up:
+    mov byte [shift_pressed], 0
+    jmp .nsd_loop
+.nsd_browser_keys:
+    cmp al, 0x01
+    je .nsd_cancel
+    cmp al, 0x0F
+    je .nsd_tab_to_name
+    cmp al, 0x48
+    je .nsd_browser_up
+    cmp al, 0x50
+    je .nsd_browser_down
+    cmp al, 0x1C
+    je .nsd_browser_enter
+    jmp .nsd_loop
+.nsd_tab_to_name:
+    cmp byte [nsd_mode], 1
+    je .nsd_tab_to_buttons
+    mov byte [nsd_focus], 1
+    jmp .nsd_loop
+.nsd_browser_up:
+    cmp dword [nsd_sel], 0
+    je .nsd_loop
+    dec dword [nsd_sel]
+    jmp .nsd_loop
+.nsd_browser_down:
+    mov eax, [nsd_sel]
+    inc eax
+    cmp eax, [nsd_count]
+    jge .nsd_loop
+    inc dword [nsd_sel]
+    jmp .nsd_loop
+.nsd_browser_enter:
+    cmp byte [nsd_level], 0
+    je .nsd_enter_drive
+    jmp .nsd_enter_folder
+.nsd_enter_drive:
+    mov eax, [nsd_sel]
+    mov al, [nsd_drive_list + eax]
+    mov [nsd_drive], al
+    call nsd_switch_to_drive
+    mov byte [nsd_level], 1
+    mov dword [nsd_sel], 0
+    mov dword [nsd_path_depth], 0
+    call nsd_build_folders
+    jmp .nsd_loop
+.nsd_enter_folder:
+    mov eax, [nsd_sel]
+    cmp eax, 0
+    je .nsd_go_parent
+    cmp byte [nsd_mode], 1
+    jne .nsd_enter_dir
+    mov ecx, [nsd_sel]
+    mov al, [nsd_entry_types + ecx]
     cmp al, 0
-    je .nod_copy_done
-    inc esi
-    inc edi
-    jmp .nod_copy
-.nod_copy_done:
-    mov esi, notepad_dlg_filename
+    je .nsd_open_file
+.nsd_enter_dir:
+    mov eax, [nsd_sel]
+    dec eax
+    mov ecx, 4
+    mul ecx
+    mov edx, [nsd_folder_offsets + eax]
+    mov edi, dir_buffer
+    add edi, edx
+    movzx eax, word [edi + 26]
+    cmp eax, 0
+    je .nsd_loop
+    mov ecx, [nsd_path_depth]
+    cmp ecx, 8
+    jge .nsd_loop
+    mov ebx, [current_dir_cluster]
+    mov [nsd_path_stack + ecx*4], ebx
+    inc dword [nsd_path_depth]
+    mov [current_dir_cluster], eax
+    call cluster_to_lba
+    mov [current_dir_sector], eax
+    mov dword [nsd_sel], 0
+    call nsd_build_folders
+    jmp .nsd_loop
+.nsd_open_file:
+    mov eax, [nsd_sel]
+    dec eax
+    mov ecx, 4
+    mul ecx
+    mov edx, [nsd_folder_offsets + eax]
+    mov edi, dir_buffer
+    add edi, edx
+    mov esi, edi
+    mov edi, notepad_current_file
+    mov ecx, 8
+.nof_copy_name:
+    lodsb
+    cmp al, ' '
+    je .nof_name_done
+    stosb
+    loop .nof_copy_name
+.nof_name_done:
+    mov al, '.'
+    stosb
+    mov ecx, 3
+.nof_copy_ext:
+    lodsb
+    cmp al, ' '
+    je .nof_ext_done
+    stosb
+    loop .nof_copy_ext
+.nof_ext_done:
+    mov byte [edi], 0
+    mov esi, notepad_current_file
     mov edi, notepad_buf
     call notepad_read_file
     mov esi, notepad_buf
     call str_len
     mov [notepad_len], eax
-    mov [notepad_cursor], eax
-.nod_cancel:
+    mov dword [notepad_cursor], 0
+    jmp .nsd_done
+.nsd_go_parent:
+    cmp dword [nsd_path_depth], 0
+    je .nsd_back_to_drives
+    dec dword [nsd_path_depth]
+    mov ecx, [nsd_path_depth]
+    mov eax, [nsd_path_stack + ecx*4]
+    mov [current_dir_cluster], eax
+    call cluster_to_lba
+    mov [current_dir_sector], eax
+    mov dword [nsd_sel], 0
+    call nsd_build_folders
+    jmp .nsd_loop
+.nsd_back_to_drives:
+    mov byte [nsd_level], 0
+    mov dword [nsd_sel], 0
+    call nsd_build_drives
+    jmp .nsd_loop
+.nsd_name_keys:
+    cmp al, 0x01
+    je .nsd_cancel
+    cmp al, 0x0F
+    je .nsd_tab_to_buttons
+    cmp al, 0x0E
+    je .nsd_name_bs
+    call scancode_to_ascii
+    cmp al, 0
+    je .nsd_loop
+    cmp al, 0x20
+    jb .nsd_loop
+    cmp al, 0x7E
+    ja .nsd_loop
+    mov bl, al
+    mov esi, nsd_filename
+    call str_len
+    cmp eax, 28
+    jge .nsd_loop
+    mov [nsd_filename + eax], bl
+    mov byte [nsd_filename + eax + 1], 0
+    jmp .nsd_loop
+.nsd_name_bs:
+    mov esi, nsd_filename
+    call str_len
+    cmp eax, 0
+    je .nsd_loop
+    mov byte [nsd_filename + eax - 1], 0
+    jmp .nsd_loop
+.nsd_tab_to_buttons:
+    mov byte [nsd_focus], 2
+    mov byte [nsd_btn_sel], 0
+    jmp .nsd_loop
+.nsd_button_keys:
+    cmp al, 0x01
+    je .nsd_cancel
+    cmp al, 0x0F
+    je .nsd_tab_to_browser
+    cmp al, 0x4B
+    je .nsd_btn_left
+    cmp al, 0x4D
+    je .nsd_btn_right
+    cmp al, 0x1C
+    je .nsd_btn_enter
+    jmp .nsd_loop
+.nsd_tab_to_browser:
+    mov byte [nsd_focus], 0
+    jmp .nsd_loop
+.nsd_btn_left:
+    mov byte [nsd_btn_sel], 0
+    jmp .nsd_loop
+.nsd_btn_right:
+    mov byte [nsd_btn_sel], 1
+    jmp .nsd_loop
+.nsd_btn_enter:
+    cmp byte [nsd_btn_sel], 0
+    jne .nsd_cancel
+    cmp byte [nsd_mode], 1
+    je .nsd_btn_open
+    cmp byte [nsd_filename], 0
+    je .nsd_loop
+    mov esi, notepad_buf
+    call str_len
+    mov [notepad_len], eax
+    call nsd_build_save_path
+    mov edi, notepad_dlg_filename
+    call notepad_write_file
+    mov esi, nsd_filename
+    mov edi, notepad_current_file
+    mov ecx, 31
+    cld
+    rep movsb
+    jmp .nsd_done
+.nsd_btn_open:
+    cmp byte [nsd_level], 0
+    je .nsd_loop
+    mov eax, [nsd_sel]
+    cmp eax, 0
+    je .nsd_loop
+    jmp .nsd_open_file
+.nsd_cancel:
+    jmp .nsd_done
+.nsd_done:
     popa
     ret
+
+nsd_build_drives:
+    pusha
+    mov byte [nsd_count], 0
+    xor ebx, ebx
+.nbd_loop:
+    cmp ebx, MAX_DRIVES
+    jge .nbd_done
+    mov eax, ebx
+    shl eax, 4
+    cmp byte [drive_table + eax], 0
+    je .nbd_next
+    mov al, [drive_table + eax + 1]
+    cmp al, 'A'
+    je .nbd_next
+    mov ecx, [nsd_count]
+    mov [nsd_drive_list + ecx], al
+    inc byte [nsd_count]
+.nbd_next:
+    inc ebx
+    jmp .nbd_loop
+.nbd_done:
+    popa
+    ret
+
+nsd_switch_to_drive:
+    pusha
+    mov ecx, 1
+.nstd_loop:
+    cmp ecx, MAX_DRIVES
+    jge .nstd_done
+    mov eax, ecx
+    shl eax, 4
+    cmp byte [drive_table + eax], 0
+    je .nstd_next
+    mov ah, [drive_table + eax + 1]
+    cmp ah, al
+    jne .nstd_next
+    mov [current_drive], cl
+    mov al, [drive_table + eax + 2]
+    mov [selected_disk], al
+    mov al, [drive_table + eax + 3]
+    mov [selected_partition], al
+    mov eax, [drive_table + eax + 4]
+    mov [selected_partition_start], eax
+    call load_boot_sector
+    call set_root_dir
+    jmp .nstd_done
+.nstd_next:
+    inc ecx
+    jmp .nstd_loop
+.nstd_done:
+    popa
+    ret
+
+nsd_build_folders:
+    pusha
+    call read_dir_sector
+    mov dword [nsd_count], 1
+    mov dword [nsd_folder_offsets], 0xFFFFFFFF
+    mov byte [nsd_entry_types], 0
+    xor ebx, ebx
+    mov ecx, [fat_root_entries]
+    cmp dword [current_dir_cluster], 0
+    je .nbf_loop
+    mov ecx, DIRS_PER_SECT
+    cmp byte [nsd_mode], 1
+    jne .nbf_loop
+    movzx ecx, byte [fat_sectors_per_cluster]
+    shl ecx, 4
+    cmp ecx, 224
+    jbe .nbf_loop
+    mov ecx, 224
+.nbf_loop:
+    cmp ebx, ecx
+    jge .nbf_done
+    mov eax, ebx
+    mov edx, 32
+    mul edx
+    mov edi, dir_buffer
+    add edi, eax
+    cmp byte [edi], 0xE5
+    je .nbf_next
+    cmp byte [edi], 0
+    je .nbf_done
+    mov al, [edi + 11]
+    test al, 0x02
+    jnz .nbf_next
+    test al, 0x10
+    jnz .nbf_is_dir
+    cmp byte [nsd_mode], 1
+    jne .nbf_next
+    jmp .nbf_add
+.nbf_is_dir:
+    cmp byte [edi], '.'
+    jne .nbf_add
+    cmp byte [edi + 1], ' '
+    je .nbf_next
+.nbf_add:
+    mov eax, [nsd_count]
+    cmp eax, 32
+    jge .nbf_done
+    mov edx, 4
+    mul edx
+    mov ecx, ebx
+    shl ecx, 5
+    mov [nsd_folder_offsets + eax], ecx
+    mov edx, [nsd_count]
+    mov al, [edi + 11]
+    test al, 0x10
+    jz .nbf_is_file
+    mov byte [nsd_entry_types + edx], 1
+    jmp .nbf_inc
+.nbf_is_file:
+    mov byte [nsd_entry_types + edx], 0
+.nbf_inc:
+    inc dword [nsd_count]
+.nbf_next:
+    inc ebx
+    jmp .nbf_loop
+.nbf_done:
+    popa
+    ret
+
+nsd_build_save_path:
+    pusha
+    mov edi, notepad_dlg_filename
+    mov al, [nsd_drive]
+    mov [edi], al
+    inc edi
+    mov byte [edi], ':'
+    inc edi
+    mov byte [edi], '/'
+    inc edi
+    mov esi, nsd_filename
+.nbsp_loop:
+    lodsb
+    cmp al, 0
+    je .nbsp_done
+    mov [edi], al
+    inc edi
+    jmp .nbsp_loop
+.nbsp_done:
+    mov byte [edi], 0
+    popa
+    ret
+
+nsd_draw:
+    pusha
+    mov ecx, 17
+.ndr_bgloop:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 3
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 9*2
+    push ecx
+    mov ecx, 62
+    mov ax, 0x7020
+    rep stosw
+    pop ecx
+    loop .ndr_bgloop
+    mov edi, 0xB8000 + 3*160 + 8*2
+    mov byte [edi], 0xDA
+    mov byte [edi+1], 0x70
+    mov ecx, 62
+.ndr_top:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x70
+    add edi, 2
+    loop .ndr_top
+    mov byte [edi+2], 0xBF
+    mov byte [edi+3], 0x70
+    mov ecx, 17
+.ndr_sides:
+    mov edi, 0xB8000
+    mov eax, ecx
+    add eax, 3
+    mov ebx, 160
+    mul ebx
+    add edi, eax
+    add edi, 8*2
+    mov byte [edi], 0xB3
+    mov byte [edi+1], 0x70
+    mov byte [edi+63*2], 0xB3
+    mov byte [edi+63*2+1], 0x70
+    loop .ndr_sides
+    mov edi, 0xB8000 + 21*160 + 8*2
+    mov byte [edi], 0xC0
+    mov byte [edi+1], 0x70
+    mov ecx, 62
+.ndr_bot:
+    mov byte [edi+2], 0xC4
+    mov byte [edi+3], 0x70
+    add edi, 2
+    loop .ndr_bot
+    mov byte [edi+2], 0xD9
+    mov byte [edi+3], 0x70
+    mov edi, 0xB8000 + 3*160 + 30*2
+    cmp byte [nsd_mode], 1
+    jne .ndr_title_save
+    mov esi, nsd_str_title_open
+    jmp .ndr_title_draw
+.ndr_title_save:
+    mov esi, nsd_str_title
+.ndr_title_draw:
+    mov ah, 0x70
+    call tui_put_str
+    mov edi, 0xB8000 + 5*160 + 10*2
+    cmp byte [nsd_level], 0
+    je .ndr_drvlabel
+    cmp byte [nsd_mode], 1
+    jne .ndr_folder_label
+    mov esi, nsd_str_files
+    jmp .ndr_labeldraw
+.ndr_folder_label:
+    mov esi, nsd_str_folders
+    jmp .ndr_labeldraw
+.ndr_drvlabel:
+    mov esi, nsd_str_drives
+.ndr_labeldraw:
+    mov ah, 0x70
+    call tui_put_str
+    mov eax, [nsd_sel]
+    mov [nsd_scroll], eax
+    sub eax, 5
+    cmp eax, 0
+    jge .ndr_scroll_ok
+    xor eax, eax
+.ndr_scroll_ok:
+    mov [nsd_scroll], eax
+    mov dword [nsd_vis_idx], 0
+.ndr_itemloop:
+    mov eax, [nsd_vis_idx]
+    cmp eax, 12
+    jge .ndr_itemsdone
+    add eax, [nsd_scroll]
+    cmp eax, [nsd_count]
+    jge .ndr_itemsdone
+    mov [nsd_cur_item], eax
+    mov edi, 0xB8000
+    mov eax, [nsd_vis_idx]
+    add eax, 6
+    mov ecx, 160
+    mul ecx
+    add edi, eax
+    add edi, 10*2
+    mov eax, [nsd_cur_item]
+    cmp eax, [nsd_sel]
+    jne .ndr_nocursor
+    cmp byte [nsd_focus], 0
+    jne .ndr_nocursor
+    mov byte [edi], '>'
+    mov byte [edi+1], 0x7F
+    jmp .ndr_cursor_done
+.ndr_nocursor:
+    mov byte [edi], ' '
+    mov byte [edi+1], 0x70
+.ndr_cursor_done:
+    add edi, 2
+    mov eax, [nsd_cur_item]
+    cmp byte [nsd_level], 0
+    je .ndr_drawdrive
+    cmp eax, 0
+    jne .ndr_drawfolder
+    mov esi, nsd_str_dotdot
+    jmp .ndr_finaldraw
+.ndr_drawfolder:
+    dec eax
+    mov ecx, 4
+    mul ecx
+    mov edx, [nsd_folder_offsets + eax]
+    push edi
+    mov esi, dir_buffer
+    add esi, edx
+    mov edi, nsd_tmpname
+    mov ecx, 8
+    rep movsb
+    mov byte [nsd_tmpname + 8], 0
+    mov esi, nsd_tmpname + 7
+.ndr_trim:
+    cmp byte [esi], ' '
+    jne .ndr_trimdone
+    mov byte [esi], 0
+    dec esi
+    cmp esi, nsd_tmpname
+    jge .ndr_trim
+.ndr_trimdone:
+    mov eax, [nsd_cur_item]
+    mov al, [nsd_entry_types + eax]
+    cmp al, 0
+    jne .ndr_nodir_ext
+    mov esi, dir_buffer
+    add esi, edx
+    add esi, 8
+    mov edi, nsd_tmpname
+    call str_len
+    add edi, eax
+    mov al, '.'
+    stosb
+    mov ecx, 3
+.ndr_ext_copy:
+    lodsb
+    cmp al, ' '
+    je .ndr_ext_done
+    stosb
+    loop .ndr_ext_copy
+.ndr_ext_done:
+    mov byte [edi], 0
+.ndr_nodir_ext:
+    pop edi
+    mov esi, nsd_tmpname
+    jmp .ndr_finaldraw
+.ndr_drawdrive:
+    mov ecx, [nsd_cur_item]
+    mov al, [nsd_drive_list + ecx]
+    mov [nsd_tmpname], al
+    mov byte [nsd_tmpname + 1], ':'
+    mov byte [nsd_tmpname + 2], 0
+    mov esi, nsd_tmpname
+.ndr_finaldraw:
+    mov eax, [nsd_cur_item]
+    cmp eax, [nsd_sel]
+    jne .ndr_notsel
+    cmp byte [nsd_focus], 0
+    jne .ndr_notsel
+    mov ah, 0x7F
+    jmp .ndr_drawit
+.ndr_notsel:
+    mov ah, 0x70
+.ndr_drawit:
+    call tui_put_str
+    inc dword [nsd_vis_idx]
+    jmp .ndr_itemloop
+.ndr_itemsdone:
+    cmp byte [nsd_mode], 1
+    je .ndr_skip_name
+    mov edi, 0xB8000 + 18*160 + 10*2
+    mov esi, nsd_str_name
+    mov ah, 0x70
+    call tui_put_str
+    mov edi, 0xB8000 + 18*160 + 18*2
+    mov ecx, 40
+    cmp byte [nsd_focus], 1
+    jne .ndr_namebg_normal
+    mov ax, 0x1F20
+    jmp .ndr_namebg_fill
+.ndr_namebg_normal:
+    mov ax, 0x7020
+.ndr_namebg_fill:
+    rep stosw
+    mov edi, 0xB8000 + 18*160 + 19*2
+    mov esi, nsd_filename
+    mov ah, 0x70
+    cmp byte [nsd_focus], 1
+    jne .ndr_namedraw
+    mov ah, 0x1F
+.ndr_namedraw:
+    call tui_put_str
+    cmp byte [nsd_focus], 1
+    jne .ndr_namecursor_done
+    mov esi, nsd_filename
+    call str_len
+    mov edi, 0xB8000 + 18*160 + 19*2
+    mov ecx, eax
+    shl ecx, 1
+    add edi, ecx
+    mov byte [edi], '_'
+    mov byte [edi+1], 0x1F
+.ndr_namecursor_done:
+.ndr_skip_name:
+    mov edi, 0xB8000 + 20*160 + 22*2
+    cmp byte [nsd_mode], 1
+    jne .ndr_save_btn_str
+    mov esi, nsd_str_open_btn
+    jmp .ndr_savebtn_check
+.ndr_save_btn_str:
+    mov esi, nsd_str_save
+.ndr_savebtn_check:
+    mov ah, 0x70
+    cmp byte [nsd_focus], 2
+    jne .ndr_savebtn
+    cmp byte [nsd_btn_sel], 0
+    jne .ndr_savebtn
+    mov ah, 0x7F
+.ndr_savebtn:
+    call tui_put_str
+    mov edi, 0xB8000 + 20*160 + 36*2
+    mov esi, nsd_str_cancel
+    mov ah, 0x70
+    cmp byte [nsd_focus], 2
+    jne .ndr_cancelbtn
+    cmp byte [nsd_btn_sel], 1
+    jne .ndr_cancelbtn
+    mov ah, 0x7F
+.ndr_cancelbtn:
+    call tui_put_str
+    mov edi, 0xB8000 + 22*160 + 10*2
+    mov esi, nsd_str_help
+    mov ah, 0x70
+    call tui_put_str
+    popa
+    ret
+nsd_focus          db 0
+nsd_level          db 0
+nsd_mode           db 0
+nsd_sel            dd 0
+nsd_count          dd 0
+nsd_scroll         dd 0
+nsd_drive          db 0
+nsd_btn_sel        db 0
+nsd_path_depth     dd 0
+nsd_path_stack     times 8 dd 0
+nsd_filename       times 32 db 0
+nsd_drive_list     times 26 db 0
+nsd_folder_offsets times 32 dd 0
+nsd_entry_types   times 32 db 0
+nsd_vis_idx        dd 0
+nsd_cur_item       dd 0
+nsd_tmpname        times 16 db 0
+nsd_str_title      db 'Save File',0
+nsd_str_title_open db 'Open File',0
+nsd_str_drives     db 'Drives:',0
+nsd_str_folders    db 'Folders:',0
+nsd_str_files      db 'Files:',0
+nsd_str_dotdot     db '..',0
+nsd_str_name       db 'Name:',0
+nsd_str_save       db '[ Save ]',0
+nsd_str_open_btn   db '[ Open ]',0
+nsd_str_cancel     db '[ Cancel ]',0
+nsd_str_help       db 'Up/Down:Select  Enter:Open  Tab:Next  Esc:Cancel',0
+
 nfd_main:
     pusha
     mov byte [nfd_focus], 2
@@ -10169,7 +12179,11 @@ nfd_scan_dir:
     mov dword [nfd_files], 0xFFFFFFFF
     inc dword [nfd_file_count]
 .nsd_noparent:
-    mov ecx, 224
+    mov ecx, [fat_root_entries]
+    cmp dword [current_dir_cluster], 0
+    je .nsd_prep
+    mov ecx, DIRS_PER_SECT
+.nsd_prep:
     xor ebx, ebx
 .nsd_loop:
     cmp ebx, ecx
@@ -10185,6 +12199,8 @@ nfd_scan_dir:
     je .nsd_done
     mov al, [edi + 11]
     test al, 0x08
+    jnz .nsd_next
+    test al, 0x02
     jnz .nsd_next
     cmp byte [edi], '.'
     jne .nsd_notdot
@@ -10607,7 +12623,6 @@ nfd_process_key:
     popa
     ret
 nfd_switch_drive:
-    ; Switch to the drive selected in nfd_drive_sel
     pusha
     movzx eax, byte [nfd_drive_sel]
     shl eax, 4
@@ -10642,7 +12657,11 @@ notepad_collect_dir:
     mov dword [notepad_dir_entries], 0xFFFFFFFF
     inc dword [notepad_dir_count]
 .ncd_np:
-    mov ecx, 224
+    mov ecx, [fat_root_entries]
+    cmp dword [current_dir_cluster], 0
+    je .ncd_prep
+    mov ecx, DIRS_PER_SECT
+.ncd_prep:
     xor ebx, ebx
 .ncd_loop:
     cmp ebx, ecx
@@ -10658,6 +12677,8 @@ notepad_collect_dir:
     je .ncd_done
     mov al, [edi + 11]
     test al, 0x08
+    jnz .ncd_next
+    test al, 0x02
     jnz .ncd_next
     cmp byte [edi], '.'
     jne .ncd_nd
@@ -10702,7 +12723,7 @@ notepad_read_file:
     push edi
     mov ecx, 0
 .read_loop:
-    cmp eax, 0x0FF8
+    call cluster_is_eof
     jae .read_done
     cmp eax, 2
     jb .read_done
@@ -10741,10 +12762,6 @@ notepad_read_file:
     popa
     ret
 notepad_ensure_path:
-    ; Input: esi = path string (e.g. "subdir/file.txt" or just "file.txt")
-    ; Ensures every directory in the path exists (creating missing ones),
-    ; navigates current_dir to the target directory, and stores the pointer
-    ; to the final name component in nw_filename_ptr.
     pusha
     mov [nw_filename_ptr], esi
 .seg_loop:
@@ -10758,7 +12775,6 @@ notepad_ensure_path:
     inc edi
     jmp .scan
 .dir_comp:
-    ; Copy the directory component [esi..edi) into tmp_component (max 12)
     push esi
     push edi
     mov ecx, edi
@@ -10773,9 +12789,7 @@ notepad_ensure_path:
     mov byte [edi], 0
     pop edi
     pop esi
-    ; edi now points at the '/' separator
     push edi
-    ; Ensure the directory exists (look it up as 8.3, create if missing)
     call read_dir_sector
     mov esi, tmp_component
     mov edi, tmp_filename
@@ -10790,7 +12804,6 @@ notepad_ensure_path:
     mov esi, tmp_component
     call cd_directory
     pop edi
-    ; Advance past the '/' and continue with the next component
     inc edi
     mov esi, edi
     mov [nw_filename_ptr], esi
@@ -10800,29 +12813,42 @@ notepad_ensure_path:
     popa
     ret
 notepad_write_file:
-    ; Save notepad buffer to file
-    ; Input: edi = pointer to filename/path string
-    ; Missing subdirectories in the path are created automatically.
     pusha
-    ; Navigate/auto-create any directories in the target path
     mov esi, edi
+    cmp byte [esi + 1], ':'
+    jne .nwf_no_drive
+    mov al, [esi]
+    call switch_drive
+    add esi, 2
+    cmp byte [esi], '/'
+    jne .nwf_no_drive
+    inc esi
+.nwf_no_drive:
     call notepad_ensure_path
-    call read_dir_sector          ; load the target directory into dir_buffer
-    mov edi, [nw_filename_ptr]    ; edi = final file name component
+    call read_dir_sector
+    mov edi, [nw_filename_ptr]
     mov [nw_dir_offset], dword -1
-    ; Convert filename to 8.3 format
     push edi
     mov esi, edi
     mov edi, tmp_filename
     call filename_to_83
     pop edi
-    ; Check if file already exists
+    cmp byte [tmp_filename + 8], 'S'
+    jne .nwf_not_sys
+    cmp byte [tmp_filename + 9], 'Y'
+    jne .nwf_not_sys
+    cmp byte [tmp_filename + 10], 'S'
+    jne .nwf_not_sys
+    mov esi, msg_sys_blocked
+    call print32
+    popa
+    ret
+.nwf_not_sys:
     mov esi, tmp_filename
     call find_dir_entry
     mov [nw_dir_offset], eax
     cmp eax, -1
     je .alloc_clusters
-    ; File exists - free old clusters
     mov edi, dir_buffer
     add edi, eax
     movzx ebx, word [edi + 26]
@@ -10831,8 +12857,15 @@ notepad_write_file:
     je .free_old_done
     cmp ebx, 2
     jb .free_old_done
+    cmp byte [fs_type], 1
+    jne .fo_fat12
+    cmp ebx, 0x0FFFFFF8
+    jae .free_old_done
+    jmp .fo_cont
+.fo_fat12:
     cmp ebx, 0xFF8
     jae .free_old_done
+.fo_cont:
     mov eax, ebx
     call get_next_cluster
     push eax
@@ -10847,7 +12880,6 @@ notepad_write_file:
     mov dword [nw_first_cluster], 0
     mov dword [nw_prev_cluster], 0
     mov dword [nw_bytes_written], 0
-    ; Check if there's data to write
     mov eax, [notepad_len]
     cmp eax, 0
     je .write_dir_entry
@@ -10874,17 +12906,15 @@ notepad_write_file:
     mov [nw_prev_cluster], eax
     push eax
     mov eax, ebx
-    mov ebx, 0x0FFF
+    call set_eof_marker
     call set_next_cluster
     pop eax
     call cluster_to_lba
     mov [nw_cur_lba], eax
-    ; Clear sector buffer
     mov edi, sector_buffer
     mov ecx, 512
     mov al, 0
     rep stosb
-    ; Copy data from notepad buffer to sector buffer
     mov esi, notepad_buf
     add esi, [nw_bytes_written]
     mov edi, sector_buffer
@@ -10899,7 +12929,6 @@ notepad_write_file:
     cld
     rep movsb
 .skip_copy:
-    ; Write sector to disk
     mov eax, [nw_cur_lba]
     mov ecx, 1
     mov esi, sector_buffer
@@ -10909,7 +12938,6 @@ notepad_write_file:
 .alloc_done:
     call write_fat
 .write_dir_entry:
-    ; Create or update directory entry
     cmp dword [nw_dir_offset], -1
     jne .update_entry
     call find_free_dir_entry
@@ -10926,12 +12954,16 @@ notepad_write_file:
 .update_entry:
     mov edi, dir_buffer
     add edi, [nw_dir_offset]
+    add edi, 11
 .set_entry:
-    mov byte [edi + 11], 0x20     ; regular file archive attribute
+    mov byte [edi - 11 + 11], 0x20
     movzx eax, word [nw_first_cluster]
-    mov word [edi + 26], ax
+    mov word [edi - 11 + 26], ax
+    mov eax, [nw_first_cluster]
+    shr eax, 16
+    mov word [edi - 11 + 20], ax
     mov eax, [notepad_len]
-    mov dword [edi + 28], eax
+    mov dword [edi - 11 + 28], eax
     call write_dir_sector
 .write_done:
     popa
@@ -11186,7 +13218,6 @@ settings_exit      db 0
 settings_str_title db 'Settings - yOS',0
 settings_str_time  db '[ Calibrate Time ]',0
 settings_str_disk  db '[ Disk Mgr ]',0
-settings_str_dev   db '[ Dev Mgr ]',0
 settings_str_back  db '[ Back ]',0
 settings_str_help  db 'Up/Down:Select  Enter:OK  Esc:Exit',0
 dm_str_title       db 'Disk Management - yOS',0
@@ -11201,26 +13232,6 @@ dm_str_act_del     db '[ Delete Partition ]',0
 dm_str_act_new     db '[ New Partition ]',0
 dm_str_act_fmt     db '[ Format ]',0
 dm_str_act_back    db '[ Back ]',0
-dev_str_title      db 'Device Manager - yOS',0
-dev_str_cpu        db 'Processor (CPU)',0
-dev_str_mem        db 'Memory: Base ',0
-dev_str_kbd        db 'Keyboard Controller (PS/2)',0
-dev_str_vga        db 'Display Adapter (VGA)',0
-dev_str_fdc        db 'Floppy Disk Controller',0
-dev_str_ata        db 'ATA/IDE Controller: ',0
-dev_str_rtc        db 'Real Time Clock (RTC)',0
-dev_str_pit        db 'Programmable Interval Timer',0
-dev_str_help       db 'Enter/Esc:Exit',0
-dev_str_present    db '[ Present ]',0
-dev_str_kb         db 'KB',0
-dev_str_drv        db 'drives',0
-
-dev_count          db 0
-dev_mem_base       dd 0
-dev_mem_ext        dd 0
-dev_cpu_count      db 0
-dev_disk_count     db 0
-dev_exit           db 0
 settings_str_done  db 'Time Calibrated!',0
 cal_str_weekdays   db 'Sun     Mon     Tue     Wed     Thu     Fri     Sat',0
 cal_str_help       db 'Left/Right to change month, ESC to exit',0
@@ -11254,7 +13265,7 @@ ctrl_pressed      db 0
 fm_str_title      db '===== yOS File Mgr =====',0
 fm_str_name       db 'Name',0
 fm_str_type       db 'Type',0
-fm_str_size       db 'Size (KB)',0
+fm_str_size       db 'Size',0
 fm_str_status     db 'Selected:',0
 fm_str_keys1      db 'F1:Help  F2:Rename  F3:NewFile  F4:NewDir  F8:View  F10:Exit',0
 fm_str_confirm_del db 'Delete selected item?',0
@@ -11265,7 +13276,7 @@ fm_str_no_f        db '> NO <',0
 fm_confirm_focus   db 0
 fm_disk_focus      db 0
 fm_drive_count     dd 0
-fm_drive_list      db 0,0,0,0,0,0,0,0
+fm_drive_list      times 26 db 0
 fm_str_disk_help   db 'Up/Down: select  Enter: confirm  Esc: cancel',0
 fm_str_keys2      db 'F11:Disk  F12:Edit  Ctrl+C:Copy  Ctrl+V:Paste  Ctrl+D:Del  Ctrl+R:Ref',0
 fm_str_newfile    db 'New file name: ',0
@@ -11363,11 +13374,6 @@ history_buf       times 1024 db 0
 history_count     dd 0
 history_pos       dd 0
 history_temp      times 128 db 0
-;=============================================================================
-; yOS Kernel - Main Entry Point
-; 32-bit protected mode kernel with FAT12/FAT32 filesystem support
-;=============================================================================
-
 cmd_loop:
     mov esi, prompt_prefix
     call print32
@@ -11407,6 +13413,10 @@ cmd_loop:
     call cmd_match
     cmp eax, 1
     je .do_dl_list
+    mov edi, cmd_dl_set_this
+    call cmd_match
+    cmp eax, 1
+    je .do_dl_set_this
     mov edi, cmd_disk_list
     call cmd_match
     cmp eax, 1
@@ -11522,6 +13532,9 @@ cmd_loop:
     jmp cmd_loop
 .do_dl_list:
     call dl_list_cmd
+    jmp cmd_loop
+.do_dl_set_this:
+    call dl_set_this_cmd
     jmp cmd_loop
 .do_disk_list:
     call disk_list
@@ -11808,7 +13821,7 @@ copy_internal_read_to_buffer:
     mov esi, 0x1F0000
     mov [copy_bytes_total], dword 0
 .read_loop:
-    cmp eax, 0x0FF8
+    call cluster_is_eof
     jae .done_read
     cmp eax, 2
     jb .done_read
@@ -11912,7 +13925,7 @@ copy_internal_write_from_buffer:
     cmp dword [copy_prev_cluster], 0
     je .zero_size
     mov eax, [copy_prev_cluster]
-    mov ebx, 0x0FFF
+    call set_eof_marker
     call set_next_cluster
     call write_fat
     call find_free_dir_entry
@@ -12198,13 +14211,7 @@ copy_parse_tokens:
     popa
     mov eax, 0
     ret
-;=============================================================================
-; Copy/Move Operations - File copy and move with path resolution
-;=============================================================================
-
 copy_cmd:
-    ; Copy file from source to destination
-    ; Usage: copy <source> <destination>
     pusha
     call copy_parse_tokens
     cmp eax, 0
@@ -12427,6 +14434,8 @@ copy_cmd:
     test al, 0x10
     jnz .wc_next_entry
     test al, 0x08
+    jnz .wc_next_entry
+    test al, 0x02
     jnz .wc_next_entry
     cmp byte [edi], '.'
     jne .wc_not_dot
@@ -12842,6 +14851,8 @@ cut_cmd:
     jnz .wc_next_entry
     test al, 0x08
     jnz .wc_next_entry
+    test al, 0x02
+    jnz .wc_next_entry
     cmp byte [edi], '.'
     jne .wc_not_dot
     cmp byte [edi + 1], ' '
@@ -13049,6 +15060,7 @@ cmd_reboot     db 'reboot', 0
 cmd_output     db 'output', 0
 cmd_help       db 'help', 0
 cmd_dl_list    db 'dl list', 0
+cmd_dl_set_this db 'dl set this', 0
 cmd_disk_list  db 'disk list', 0
 cmd_disk_sel   db 'disk sel', 0
 cmd_disk_part  db 'disk part', 0
