@@ -1,6 +1,6 @@
 [org 0x7c00]
 [bits 16]
-KERNEL_SECTORS equ 128
+KERNEL_SECTORS_DEFAULT equ 256
 CHUNK_SIZE equ 32
 start:
     cli
@@ -26,7 +26,10 @@ start:
     mov dword [dap_lba + 4], 0
     mov word [dap_segment], 0x1000
     mov word [dap_offset], 0
-    mov cx, KERNEL_SECTORS
+    mov cx, [0x7c00 + 508]
+    cmp cx, 0
+    jne read_loop
+    mov cx, KERNEL_SECTORS_DEFAULT
 read_loop:
     cmp cx, 0
     je read_done
@@ -110,5 +113,6 @@ loading_msg:
     db 'Loading yOS...', 0x0d, 0x0a, 0
 error_msg:
     db 'Disk read error.', 0x0d, 0x0a, 0
-times 510-($-$$) db 0
+times 508-($-$$) db 0
+kernel_sectors_count dw 0
 dw 0xaa55
