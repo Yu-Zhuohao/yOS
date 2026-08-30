@@ -87,7 +87,12 @@ nasm -f bin boot.asm -o boot.bin
 nasm -f bin kernel.asm -o kernel.bin
 
 # Create a disk image (e.g., 4MB)
+
+#Linux：
 dd if=/dev/zero of=disk.vhd bs=1M count=4
+
+#Windows：
+DISKPART> create vdisk file="C:\Users\Download\yOS\src\disk.vhd" maximum=4 type=fixed
 
 # Write boot sector
 dd if=boot.bin of=disk.vhd bs=512 count=1 conv=notrunc
@@ -200,8 +205,13 @@ yOS 是一个完全用 x86 汇编语言（NASM 语法）编写的操作系统内
 nasm -f bin boot.asm -o boot.bin
 nasm -f bin kernel.asm -o kernel.bin
 
-# 创建磁盘镜像（例如 4MB）
+## 创建磁盘镜像（例如 4MB）
+
+#Linux：
 dd if=/dev/zero of=disk.vhd bs=1M count=4
+
+#Windows：
+DISKPART> create vdisk file="C:\Users\Download\yOS\src\disk.vhd" maximum=4 type=fixed
 
 # 写入引导扇区
 dd if=boot.bin of=disk.vhd bs=512 count=1 conv=notrunc
